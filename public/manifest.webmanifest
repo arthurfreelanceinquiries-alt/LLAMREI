@@ -1,0 +1,16 @@
+{
+  "name": "Llamrei Command Dashboard",
+  "short_name": "Llamrei",
+  "description": "Personal Command, ClickUp Workspace, Task Alarm, NectarLink Phone Hub & Life OS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050507",
+  "theme_color": "#00D992",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

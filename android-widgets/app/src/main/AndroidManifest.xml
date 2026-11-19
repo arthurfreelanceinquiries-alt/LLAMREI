@@ -1,0 +1,108 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="app.llamrei.widgets">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Llamrei"
+        android:usesCleartextTraffic="true">
+
+        <!-- Main Dashboard Activity (Full Screen WebView + Background Widget Sync) -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="Llamrei">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Secondary Config Activity (LAN & Tailscale URL override) -->
+        <activity
+            android:name=".ServerConfigActivity"
+            android:exported="false"
+            android:label="Llamrei Settings" />
+
+        <!-- 1. All-in-One Widget (4x3: Task + Reminder + Alarm) -->
+        <receiver
+            android:name=".AllInOneLlamreiWidgetProvider"
+            android:exported="true"
+            android:label="Llamrei All-in-One (Task + Reminder + Alarm)">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_all_in_one_info" />
+        </receiver>
+
+        <!-- 2. Modular Task Widget (3x2) -->
+        <receiver
+            android:name=".TaskWidgetProvider"
+            android:exported="true"
+            android:label="Llamrei Tasks (ClickUp)">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_task_info" />
+        </receiver>
+
+        <!-- 3. Modular Hard Alarm Widget (2x2) -->
+        <receiver
+            android:name=".AlarmWidgetProvider"
+            android:exported="true"
+            android:label="Llamrei Hard Alarm">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_alarm_info" />
+        </receiver>
+
+        <!-- 4. Modular Reminder & Calendar Widget (3x2) -->
+        <receiver
+            android:name=".ReminderWidgetProvider"
+            android:exported="true"
+            android:label="Llamrei Reminders">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_reminder_info" />
+        </receiver>
+
+        <!-- Internal non-exported receiver for mutating widget actions (prevents 3rd-party spoofing) -->
+        <receiver
+            android:name=".WidgetActionReceiver"
+            android:exported="false" />
+
+        <!-- Exact Alarm Receiver & Boot Re-armer -->
+        <receiver
+            android:name=".ExactAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <activity
+            android:name=".AlarmRingingActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
+    </application>
+</manifest>

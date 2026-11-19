@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root,
+html[data-theme="tactical"] {
+  --bg-void: #050507;
+  --bg-panel: #080a0e;
+  --bg-topbar: #090b10;
+  --bg-card: #0b0d13;
+  --bg-elevated: #111622;
+  --border-subtle: #1e222d;
+  --border-accent: rgba(0, 217, 146, 0.45);
+  --text-primary: #f2f2f2;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #00d992;
+  --accent-fg: #050507;
+  --accent-soft: rgba(0, 217, 146, 0.14);
+  --accent-2: #06b6d4;
+  --radius-card: 0.5rem;
+}
+
+html[data-theme="hybrid"] {
+  --bg-void: #090a0f;
+  --bg-panel: #0b0d14;
+  --bg-topbar: #0e1018;
+  --bg-card: rgba(18, 21, 33, 0.9);
+  --bg-elevated: #181c2b;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-accent: rgba(129, 140, 248, 0.45);
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --accent: #818cf8;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(129, 140, 248, 0.16);
+  --accent-2: #06b6d4;
+  --radius-card: 0.75rem;
+}
+
+html[data-theme="obsidian"] {
+  --bg-void: #08090a;
+  --bg-panel: #0f1011;
+  --bg-topbar: #0c0d0e;
+  --bg-card: #141517;
+  --bg-elevated: #1c1d20;
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-accent: rgba(113, 112, 255, 0.45);
+  --text-primary: #f7f8f8;
+  --text-secondary: #d0d6e0;
+  --text-muted: #8a8f98;
+  --accent: #5e6ad2;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(94, 106, 210, 0.16);
+  --accent-2: #7170ff;
+  --radius-card: 0.5rem;
+}
+
+html[data-theme="bento"] {
+  --bg-void: #070b14;
+  --bg-panel: #0a101d;
+  --bg-topbar: #0d1526;
+  --bg-card: rgba(17, 26, 46, 0.78);
+  --bg-elevated: #17233c;
+  --border-subtle: rgba(56, 189, 248, 0.16);
+  --border-accent: rgba(56, 189, 248, 0.45);
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --accent: #38bdf8;
+  --accent-fg: #050507;
+  --accent-soft: rgba(56, 189, 248, 0.15);
+  --accent-2: #10b981;
+  --radius-card: 1rem;
+}
+
+body {
+  background-color: var(--bg-void);
+  color: var(--text-primary);
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  margin: 0;
+}
+
+.font-mono-num {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.themed-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+}
+
+.themed-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.themed-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.themed-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+}
