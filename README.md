@@ -16,7 +16,8 @@
 
 Dokumentasi master yang menjelaskan seluruh visi, kebutuhan fungsional (FR-01 s/d FR-81), diagram arsitektur komponen, skema database, dan roadmap implementasi tersedia lengkap di:
 
-👉 **[DOKUMEN INDUK & BLUEPRINT SISTEM (v3.0)](DOKUMEN_INDUK_LLAMREI.md)**
+👉 **[DOKUMEN INDUK & BLUEPRINT SISTEM (v3.0)](DOKUMEN_INDUK_LLAMREI.md)**  
+👉 **[ROADMAP & IDE PENGEMBANGAN v3.1–v4.0 (Penegakan Disiplin & Ketahanan)](docs/ROADMAP_DAN_IDE_PENGEMBANGAN.md)**
 
 ---
 

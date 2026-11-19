@@ -263,6 +263,10 @@ timeline
 - [x] **Milestone 4.4 (Ekstraksi Event Proposal & Strict Calendar Gate):** Pendeteksian janji temu dari chat dan penguncian gerbang kalender (agenda hanya tercatat ke kalender setelah dikonfirmasi pengguna via tombol *Accept*).
 - [x] **Milestone 4.5 (Paket Rilis & Kepatuhan Google Play Store):** Skrip `scripts/build-apk.sh` dan `scripts/build-android-bundle.sh` (`.aab`), ikon resolusi tinggi 512x512 (`docs/playstore/icon-512.png`), banner grafis fitur 1024x500 (`docs/playstore/feature-graphic-1024x500.png`), metadata listing toko (`STORE_LISTING_METADATA.md`), kebijakan privasi (`PRIVACY_POLICY.md`), formulir keamanan data (`GOOGLE_PLAY_DATA_SAFETY.md`), dan panduan pengajuan toko (`PLAY_STORE_SUBMISSION_CHECKLIST.md`).
 
+### 7.2 Roadmap Penegakan Disiplin & Ketahanan (v3.1 – v4.0)
+Seluruh rencana strategis penutupan celah operasional dan penegakan disiplin trading, memori RAG, ketahanan backup SQLite, dan integrasi skripsi/BEM didokumentasikan di:  
+👉 **[ROADMAP & IDE PENGEMBANGAN v3.1–v4.0 (Penegakan Disiplin & Ketahanan)](docs/ROADMAP_DAN_IDE_PENGEMBANGAN.md)**
+
 ---
 
 ## 8. Keputusan Arsitektur yang Telah Dikunci (Locked Decisions)
