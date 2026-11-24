@@ -10,6 +10,7 @@ interface Props {
   onSendPrompt: (prompt: string, context?: Record<string, unknown> | null) => Promise<void>;
   onApproveAudit: (auditId: string) => Promise<void>;
   onUndoAudit: (auditId: string) => Promise<void>;
+  onClose?: () => void;
 }
 
 export function RightLlamreiDrawer({
@@ -20,6 +21,7 @@ export function RightLlamreiDrawer({
   onSendPrompt,
   onApproveAudit,
   onUndoAudit,
+  onClose,
 }: Props) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -100,11 +102,20 @@ export function RightLlamreiDrawer({
           </button>
           <button
             onClick={() => setShowAudit((v) => !v)}
-            className="px-2 py-1 rounded text-xs font-mono-num border cursor-pointer"
+            className="px-2 py-1 rounded text-xs font-mono-num border cursor-pointer hover:bg-white/5"
             style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
           >
             {showAudit ? '💬 Chat' : `📜 Audit (${auditLogs.length})`}
           </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-1 rounded text-xs hover:bg-white/10 transition cursor-pointer text-white/50 hover:text-white"
+              title="Tutup Panel Copilot (⌘J)"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 

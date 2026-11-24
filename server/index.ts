@@ -74,6 +74,8 @@ import {
   getBaileysThread,
   sendBaileysMessage,
   disconnectBaileys,
+  syncBaileysGroups,
+  autoConnectBaileysIfCredsExist,
 } from './services/whatsapp-baileys.service.ts';
 import {
   applyTaskTemplateToList,
@@ -620,6 +622,11 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     sendJson(res, 200, { ok: true, message: 'Inisialisasi Baileys WhatsApp dimulai' });
     return true;
   }
+  if (method === 'POST' && pathname === '/api/baileys/sync') {
+    const syncedGroups = await syncBaileysGroups();
+    sendJson(res, 200, { ok: true, syncedGroups });
+    return true;
+  }
   if (method === 'POST' && pathname === '/api/baileys/disconnect') {
     disconnectBaileys();
     sendJson(res, 200, { ok: true, message: 'Baileys WhatsApp terputus' });
@@ -903,6 +910,7 @@ const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === fileUR
 if (isEntrypoint) {
   initDatabase();
   startBackgroundDaemons();
+  autoConnectBaileysIfCredsExist();
   const port = Number(process.env.LLAMREI_PORT ?? 4321);
   // Bind strictly to loopback by default; Tailscale Serve proxies privately to 127.0.0.1
   const host = process.env.LLAMREI_HOST ?? '127.0.0.1';

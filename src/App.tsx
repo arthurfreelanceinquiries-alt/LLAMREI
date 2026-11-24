@@ -39,6 +39,17 @@ function DashboardShell() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusedChatJid, setFocusedChatJid] = useState<string | null>(null);
+  const [copilotOpen, setCopilotOpen] = useState(() => {
+    return localStorage.getItem('llamrei_copilot_open') === 'true';
+  });
+
+  const toggleCopilot = useCallback(() => {
+    setCopilotOpen((v) => {
+      const next = !v;
+      localStorage.setItem('llamrei_copilot_open', String(next));
+      return next;
+    });
+  }, []);
 
   const loadBootstrap = useCallback(async () => {
     const payload = await apiRequest<BootstrapPayload>('/api/bootstrap');
@@ -51,17 +62,21 @@ function DashboardShell() {
     void loadBootstrap();
   }, [loadBootstrap]);
 
-  // Global Ctrl+K / Cmd+K shortcut
+  // Global Keyboard Shortcuts (Cmd+K for Command Palette, Cmd+J for Copilot)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCmdOpen((v) => !v);
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        toggleCopilot();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [toggleCopilot]);
 
   // Real-time SSE listener
   useEffect(() => {
@@ -169,6 +184,7 @@ function DashboardShell() {
   const unrepliedWaTagCount = data.waTagMentions.filter((m) => m.replied_status === 'unreplied').length;
 
   const sendPromptToLlamrei = async (prompt: string, context?: Record<string, unknown> | null) => {
+    setCopilotOpen(true);
     await apiRequest('/api/agent/prompt', { method: 'POST', body: { prompt, contextAttachment: context ?? null } });
     await loadBootstrap();
   };
@@ -182,16 +198,14 @@ function DashboardShell() {
         network={data.network}
         aiBudget={data.aiBudget}
         baileysStatus={data.baileys}
+        isCopilotOpen={copilotOpen}
+        onToggleCopilot={toggleCopilot}
         onOpenCommandPalette={() => setCmdOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenAlarms={() => setActiveTab('calendar')}
         onOpenPhoneHub={() => setActiveTab('phonehub')}
         onOpenFocusedChat={() => {
-          if (data.baileysThreads.length > 0) {
-            setFocusedChatJid(data.baileysThreads[0].chatJid);
-          } else {
-            setActiveTab('watags');
-          }
+          setActiveTab('watags');
         }}
         onTestAlarm={() => void apiRequest('/api/calendar-alarms/alarms/test', { method: 'POST', body: {} })}
       />
@@ -523,6 +537,15 @@ function DashboardShell() {
                 await apiRequest('/api/baileys/disconnect', { method: 'POST', body: {} });
                 await loadBootstrap();
               }}
+              onSyncBaileysGroups={async () => {
+                const res = await apiRequest<{ ok: boolean; syncedGroups: number }>('/api/baileys/sync', { method: 'POST', body: {} });
+                setToast({ text: `✓ Berhasil menyinkronkan ${res.syncedGroups} grup WhatsApp!` });
+                await loadBootstrap();
+              }}
+              onSendBaileysMessage={async (chatJid, text) => {
+                await apiRequest('/api/baileys/send', { method: 'POST', body: { chatJid, text } });
+                await loadBootstrap();
+              }}
               onOpenFocusedChat={(chatJid) => {
                 setFocusedChatJid(chatJid ?? data.baileysThreads[0]?.chatJid ?? 'direct');
               }}
@@ -639,21 +662,24 @@ function DashboardShell() {
         </main>
 
         {/* RIGHT LLAMREI CO-COMMANDER DRAWER */}
-        <RightLlamreiDrawer
-          messages={data.chatMessages}
-          auditLogs={data.auditLogs}
-          pendingContext={pendingContext}
-          onClearContext={() => setPendingContext(null)}
-          onSendPrompt={sendPromptToLlamrei}
-          onApproveAudit={async (auditId) => {
-            await apiRequest(`/api/agent/audit/${auditId}/approve`, { method: 'POST', body: {} });
-            await loadBootstrap();
-          }}
-          onUndoAudit={async (auditId) => {
-            await apiRequest(`/api/agent/audit/${auditId}/undo`, { method: 'POST', body: {} });
-            await loadBootstrap();
-          }}
-        />
+        {copilotOpen && (
+          <RightLlamreiDrawer
+            messages={data.chatMessages}
+            auditLogs={data.auditLogs}
+            pendingContext={pendingContext}
+            onClearContext={() => setPendingContext(null)}
+            onSendPrompt={sendPromptToLlamrei}
+            onClose={() => setCopilotOpen(false)}
+            onApproveAudit={async (auditId) => {
+              await apiRequest(`/api/agent/audit/${auditId}/approve`, { method: 'POST', body: {} });
+              await loadBootstrap();
+            }}
+            onUndoAudit={async (auditId) => {
+              await apiRequest(`/api/agent/audit/${auditId}/undo`, { method: 'POST', body: {} });
+              await loadBootstrap();
+            }}
+          />
+        )}
       </div>
 
       {/* Drawers & Modals */}

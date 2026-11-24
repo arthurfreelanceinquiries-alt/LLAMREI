@@ -65,14 +65,14 @@ export function LeftClickUpSidebar({
   };
 
   const navItems: Array<{ id: NavTab; icon: string; label: string; badge?: string | number }> = [
-    { id: 'morning', icon: '🌅', label: 'Layar Pagi' },
-    { id: 'clickup', icon: '🗂️', label: 'ClickUp Space', badge: openTaskCount },
+    { id: 'morning', icon: '🌅', label: 'Ringkasan Pagi' },
+    { id: 'clickup', icon: '🗂️', label: 'Manajemen Tugas', badge: openTaskCount },
     { id: 'calendar', icon: '📅', label: 'Kalender & Alarm', badge: armedAlarmCount },
-    { id: 'phonehub', icon: '📱', label: 'Phone Hub & Widget' },
-    { id: 'scheduler', icon: '💬', label: 'Jadwal Chat', badge: pendingChatCount > 0 ? `${pendingChatCount} Wait` : undefined },
-    { id: 'watags', icon: '🏷️', label: 'Tag WhatsApp', badge: unrepliedWaTagCount > 0 ? unrepliedWaTagCount : undefined },
+    { id: 'watags', icon: '💬', label: 'Pusat WhatsApp', badge: unrepliedWaTagCount > 0 ? unrepliedWaTagCount : undefined },
     { id: 'journal', icon: '📊', label: 'Jurnal Trading' },
     { id: 'goals', icon: '🎯', label: 'Goals & Life OS' },
+    { id: 'phonehub', icon: '📱', label: 'Phone Hub (HP)' },
+    { id: 'scheduler', icon: '⏱️', label: 'Pesan Terjadwal', badge: pendingChatCount > 0 ? `${pendingChatCount} Wait` : undefined },
   ];
 
   return (
