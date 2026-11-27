@@ -309,7 +309,10 @@ export function updateTask(taskId: string, patch: UpdateTaskPatch): TaskRow | nu
     taskId,
   );
 
-  syncTaskToCalendarAndAlarms(taskId);
+  syncTaskToCalendarAndAlarms(taskId, {
+    reopen: prev.status === 'Done' && patch.status !== undefined && patch.status !== 'Done',
+    enableHardAlarm: !prev.hard_alarm_enabled && patch.hardAlarmEnabled === true,
+  });
   recomputeGoalProgress(prev.goal_id);
   if (patch.goalId && patch.goalId !== prev.goal_id) {
     recomputeGoalProgress(patch.goalId);

@@ -213,32 +213,34 @@ export function getGanttAndWorkloadSummary(): {
   }>;
 
   const dayMap = new Map<string, { taskCount: number; estimatedMinutes: number }>();
-  const timelineTasks = tasks.map((t) => {
-    const startAt = t.auto_scheduled_block_start ?? t.start_at ?? t.due_at ?? new Date().toISOString();
-    const endAt = t.auto_scheduled_block_end ?? t.due_at ?? startAt;
-    const dateKey = todayWibIsoDate(new Date(Date.parse(startAt) || Date.now()));
-    const prev = dayMap.get(dateKey) ?? { taskCount: 0, estimatedMinutes: 0 };
-    if (t.status !== 'Done') {
-      prev.taskCount += 1;
-      prev.estimatedMinutes += t.time_estimate_minutes || 30;
+  const timelineTasks = tasks.flatMap((task) => {
+    const startAt = task.auto_scheduled_block_start ?? task.start_at ?? task.due_at;
+    if (!startAt || !Number.isFinite(Date.parse(startAt))) return [];
+    const endAt = task.auto_scheduled_block_end ?? task.due_at ?? startAt;
+    const dateKey = todayWibIsoDate(new Date(startAt));
+    const estimateMinutes = Math.max(0, task.time_estimate_minutes);
+    if (task.status !== 'Done') {
+      const load = dayMap.get(dateKey) ?? { taskCount: 0, estimatedMinutes: 0 };
+      load.taskCount += 1;
+      load.estimatedMinutes += estimateMinutes;
+      dayMap.set(dateKey, load);
     }
-    dayMap.set(dateKey, prev);
-
-    return {
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
+    return [{
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      priority: task.priority,
       startAt,
-      endAt,
-      estimateMinutes: t.time_estimate_minutes || 30,
-    };
-  });
+      endAt: Date.parse(endAt) >= Date.parse(startAt) ? endAt : startAt,
+      estimateMinutes,
+    }];
+  }).sort((left, right) => Date.parse(left.startAt) - Date.parse(right.startAt));
 
-  const weeklyWorkload = [...dayMap.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(0, 7)
-    .map(([dateWib, stats]) => ({ dateWib, ...stats }));
+  const now = Date.now();
+  const weeklyWorkload = Array.from({ length: 7 }, (_, offset) => {
+    const dateWib = todayWibIsoDate(new Date(now + offset * 86_400_000));
+    return { dateWib, ...(dayMap.get(dateWib) ?? { taskCount: 0, estimatedMinutes: 0 }) };
+  });
 
   return { timelineTasks, weeklyWorkload };
 }

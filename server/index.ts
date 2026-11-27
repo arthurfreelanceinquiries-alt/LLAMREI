@@ -40,6 +40,7 @@ import {
   syncComposioConnections,
 } from './services/composio.service.ts';
 import {
+  applyAutoSchedulePlan,
   computeAutoScheduleForToday,
   getRealDataKpis,
   saveDailyCheckIn,
@@ -168,6 +169,11 @@ function getAllSettings(): Record<string, unknown> {
     }
   }
   return map;
+}
+
+function validScheduleRange(start: unknown, end?: unknown): boolean {
+  if (typeof start !== 'string' || !Number.isFinite(Date.parse(start))) return false;
+  return end == null || (typeof end === 'string' && Date.parse(end) >= Date.parse(start));
 }
 
 async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
@@ -311,13 +317,20 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
       color?: string;
       notes?: string;
       withHardAlarm?: boolean;
+      ringPhone?: boolean;
     }>(req);
-    sendJson(res, 201, createStandaloneCalendarEvent(body));
+    if (typeof body?.title !== 'string' || !body.title.trim() || !validScheduleRange(body.startAt, body.endAt)) {
+      throw new HttpBadRequestError(400, 'Judul dan rentang waktu agenda harus valid.');
+    }
+    sendJson(res, 201, createStandaloneCalendarEvent({ ...body, title: body.title.trim() }));
     return true;
   }
   if (method === 'PATCH' && /^\/api\/calendar-alarms\/events\/[^/]+\/move$/.test(pathname)) {
     const eventId = pathname.split('/')[4];
     const body = await readJsonBody<{ startAt: string; endAt?: string | null }>(req);
+    if (!validScheduleRange(body?.startAt, body?.endAt)) {
+      throw new HttpBadRequestError(400, 'Rentang waktu agenda tidak valid.');
+    }
     const updated = moveCalendarEvent(eventId, body.startAt, body.endAt);
     if (!updated) sendError(res, 404, 'Event not found');
     else sendJson(res, 200, updated);
@@ -331,24 +344,38 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
       soundPreset?: SoundPreset;
       ringPhone?: boolean;
     }>(req);
-    sendJson(res, 201, createOrUpdateHardAlarm(body));
+    if (typeof body?.title !== 'string' || !body.title.trim() || !validScheduleRange(body.triggerAt)) {
+      throw new HttpBadRequestError(400, 'Judul dan waktu alarm harus valid.');
+    }
+    sendJson(res, 201, createOrUpdateHardAlarm({ ...body, title: body.title.trim() }));
     return true;
   }
   if (method === 'PATCH' && /^\/api\/calendar-alarms\/alarms\/[^/]+\/toggle$/.test(pathname)) {
     const alarmId = pathname.split('/')[4];
     const body = await readJsonBody<{ enabled: boolean }>(req);
-    sendJson(res, 200, toggleAlarmEnabled(alarmId, body.enabled));
+    if (typeof body?.enabled !== 'boolean') throw new HttpBadRequestError(400, 'Status aktif alarm harus valid.');
+    const updated = toggleAlarmEnabled(alarmId, body.enabled);
+    if (!updated) sendError(res, 404, 'Alarm tidak ditemukan.');
+    else sendJson(res, 200, updated);
     return true;
   }
   if (method === 'POST' && /^\/api\/calendar-alarms\/alarms\/[^/]+\/snooze$/.test(pathname)) {
     const alarmId = pathname.split('/')[4];
     const body = await readJsonBody<{ minutes?: number }>(req);
-    sendJson(res, 200, snoozeAlarm(alarmId, body.minutes ?? 10, 'web'));
+    const minutes = body?.minutes ?? 10;
+    if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 24 * 60) {
+      throw new HttpBadRequestError(400, 'Durasi tunda alarm harus di antara 0 dan 24 jam.');
+    }
+    const updated = snoozeAlarm(alarmId, minutes, 'web');
+    if (!updated) sendError(res, 404, 'Alarm tidak ditemukan.');
+    else sendJson(res, 200, updated);
     return true;
   }
   if (method === 'POST' && /^\/api\/calendar-alarms\/alarms\/[^/]+\/dismiss$/.test(pathname)) {
     const alarmId = pathname.split('/')[4];
-    sendJson(res, 200, dismissAlarm(alarmId, 'web'));
+    const updated = dismissAlarm(alarmId, 'web');
+    if (!updated) sendError(res, 404, 'Alarm tidak ditemukan.');
+    else sendJson(res, 200, updated);
     return true;
   }
   if (method === 'POST' && pathname === '/api/calendar-alarms/alarms/test') {
@@ -476,8 +503,24 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     return true;
   }
   if (method === 'POST' && pathname === '/api/lifeos/auto-schedule') {
-    const body = await readJsonBody<{ apply?: boolean }>(req);
-    sendJson(res, 200, computeAutoScheduleForToday(Boolean(body.apply)));
+    const body = await readJsonBody<{
+      apply?: boolean;
+      expected?: Array<{ taskId: string; blockStart: string; blockEnd: string }>;
+    }>(req);
+    const plan = computeAutoScheduleForToday();
+    if (body?.apply === true) {
+      if (body.expected !== undefined && (!Array.isArray(body.expected)
+        || body.expected.length !== plan.proposals.length
+        || !plan.proposals.every(({ taskId, blockStart, blockEnd }, index) => {
+          const item = body.expected?.[index];
+          return item?.taskId === taskId && item.blockStart === blockStart && item.blockEnd === blockEnd;
+        }))) {
+        sendError(res, 409, 'Jadwal berubah. Buka pratinjau baru sebelum menerapkan.');
+        return true;
+      }
+      applyAutoSchedulePlan(plan.proposals);
+    }
+    sendJson(res, 200, plan);
     return true;
   }
 

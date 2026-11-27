@@ -47,3 +47,9 @@ Node 24 completed a fresh lockfile installation (191 packages), typecheck, a pro
 Chromium exercised anonymous fixtures at 360, 768 and 1440 px. Verified navigation and collapse, 44 px primary navigation targets, keyboard palette selection into task detail, Escape and focus restoration, JARVIS shortcut, task title filtering and keyboard tabs, and reload from a simulated bootstrap failure. The title area at 360 px measured 302 px. The screenshots showed no horizontal document overflow. Scoped axe checks returned zero automated violations for the palette and inspected desktop screens. The tested text token pairs measured 6.51:1 or higher in both themes. Full manual contrast review, migration of legacy UI primitives, and performance checks on target hardware are outstanding.
 
 Phase 03 still needs the wider workspace redesign and functional acceptance for CRUD, drag/drop, calendar and alarms. Live Phase 01 delivery, device acknowledgement and paid AI reservations remain open.
+
+## Phase 03 batch 1 — schedule and alarm integrity
+
+The commit titled `fix(calendar): preserve durations and linked alarm state` keeps durations during a calendar move, updates linked alarms and task projections together, and preserves a task deadline when moving its independent focus block. Metadata edits preserve snoozed or dismissed alarms. Due alarms compare instants across timezone offsets and are claimed before delivery work. Schedule previews account for events crossing midnight in WIB. Interactive schedule application can reject a preview that changed before confirmation. Unscheduled tasks stay outside the timeline.
+
+The full server suite passed 43 tests, including five calendar regression cases on disposable SQLite. No schema migration was needed. Browser acceptance for the redesigned screens is tracked in the next batch.
