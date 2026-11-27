@@ -26,6 +26,17 @@ interface Props {
   onClose?: () => void;
 }
 
+function hasUndoAction(payload: string | null | undefined): boolean {
+  if (!payload) return false;
+  try {
+    const { kind } = JSON.parse(payload) as { kind?: string };
+    return ['revert_scheduled_message', 'delete_task', 'delete_created_event', 'restore_task_alarm', 'restore_schedule']
+      .some((action) => action === kind);
+  } catch {
+    return false;
+  }
+}
+
 export function RightLlamreiDrawer({
   messages,
   auditLogs,
@@ -41,6 +52,8 @@ export function RightLlamreiDrawer({
 }: Props) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [auditBusy, setAuditBusy] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
   const [showAudit, setShowAudit] = useState(false);
   const [listening, setListening] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(false);
@@ -106,6 +119,19 @@ export function RightLlamreiDrawer({
       if (pendingContext) onClearContext();
     } finally {
       setBusy(false);
+    }
+  };
+
+  const submitAudit = async (auditId: string, run: (id: string) => Promise<void>) => {
+    if (auditBusy) return;
+    setAuditBusy(auditId);
+    setAuditError(null);
+    try {
+      await run(auditId);
+    } catch {
+      setAuditError('Status aksi berubah atau permintaan gagal. Muat ulang sebelum mencoba lagi.');
+    } finally {
+      setAuditBusy(null);
     }
   };
 
@@ -207,6 +233,8 @@ export function RightLlamreiDrawer({
         )}
       </div>
 
+      {auditError && <p className="text-xs text-rose-300" role="alert">{auditError}</p>}
+
       {/* Feed or Audit History */}
       {showAudit ? (
         <div className="flex-1 overflow-y-auto themed-scroll space-y-2 pr-1">
@@ -219,9 +247,10 @@ export function RightLlamreiDrawer({
                 <span className="font-mono-num px-1.5 py-0.5 rounded bg-white/5">{log.status}</span>
               </div>
               <div style={{ color: 'var(--text-secondary)' }}>{log.user_command}</div>
-              {log.status === 'approved_executed' && (
+              {log.status === 'approved_executed' && hasUndoAction(log.undo_payload_json) && (
                 <button
-                  onClick={() => void onUndoAudit(log.id)}
+                  disabled={auditBusy !== null}
+                  onClick={() => void submitAudit(log.id, onUndoAudit)}
                   className="text-xs font-mono-num px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 cursor-pointer"
                 >
                   ↶ Undo Aksi Ini
@@ -275,7 +304,7 @@ export function RightLlamreiDrawer({
                             : 'var(--border-subtle)',
                     }}
                   >
-                    <div className="flex items-center justify-between font-mono-num">
+                    <div className="flex flex-wrap items-center justify-between gap-x-2 font-mono-num">
                       <span
                         className="font-bold"
                         style={{
@@ -291,42 +320,42 @@ export function RightLlamreiDrawer({
                           ? '⚠ MENUNGGU APPROVAL'
                           : card.status === 'approved_executed'
                             ? '✓ APPROVED & DIEKSEKUSI'
-                            : '↶ UNDONE'}
+                            : card.status === 'failed'
+                              ? card.executionOutcome === 'unknown'
+                                ? 'HASIL TIDAK TERKONFIRMASI'
+                                : card.executionOutcome === 'denied'
+                                  ? 'EKSEKUSI DITOLAK'
+                                  : 'EKSEKUSI GAGAL'
+                              : card.status === 'rejected'
+                                ? 'DITOLAK'
+                                : '↶ UNDONE'}
                       </span>
                       <span style={{ color: 'var(--text-muted)' }}>{card.toolName}</span>
                     </div>
                     <div className="font-semibold">{card.title}</div>
-                    <div className="whitespace-pre-wrap" style={{ color: 'var(--text-secondary)' }}>
+                    <div className="whitespace-pre-wrap break-words" style={{ color: 'var(--text-secondary)' }}>
                       {card.summary}
                     </div>
+                    {card.executionNote && <p role="status">{card.executionNote}</p>}
                     <div className="flex items-center gap-2 pt-1">
                       {card.status === 'pending_approval' && (
                         <button
-                          onClick={() => void onApproveAudit(card.auditId)}
+                          disabled={auditBusy !== null}
+                          onClick={() => void submitAudit(card.auditId, onApproveAudit)}
                           className="flex-1 py-1.5 px-2.5 rounded font-mono-num font-bold text-xs cursor-pointer"
                           style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
                         >
                           ✓ Approve & Jalankan
                         </button>
                       )}
-                      {card.status === 'approved_executed' && (
+                      {card.status === 'approved_executed' && hasUndoAction(auditLogs.find(({ id }) => id === card.auditId)?.undo_payload_json) && (
                         <button
-                          onClick={() => void onUndoAudit(card.auditId)}
+                          disabled={auditBusy !== null}
+                          onClick={() => void submitAudit(card.auditId, onUndoAudit)}
                           className="py-1 px-2.5 rounded font-mono-num text-xs bg-rose-500/20 text-rose-300 border border-rose-500/30 cursor-pointer"
                         >
                           ↶ Undo
                         </button>
-                      )}
-                      {card.waMeUrl && (
-                        <a
-                          href={card.waMeUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="py-1.5 px-2.5 rounded font-mono-num text-xs border"
-                          style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)', color: 'var(--accent-2)' }}
-                        >
-                          wa.me ↗
-                        </a>
                       )}
                     </div>
                   </div>
@@ -356,7 +385,7 @@ export function RightLlamreiDrawer({
         <div className="flex gap-1 overflow-x-auto pb-0.5">
           {[
             'Briefing pagi',
-            'Jadwalkan chat ke Raka jam 19:00 soal slide',
+            'Jadwalkan chat ke kontak saya jam 19:00 soal slide',
             'Auto schedule hari ini',
             'Pasang alarm jam 20:00 evaluasi market',
           ].map((preset) => (

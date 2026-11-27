@@ -1,24 +1,13 @@
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import { getDb, todayWibIsoDate, wibOffsetIso } from '../db/connection.ts';
+import { getDb, wibOffsetIso } from '../db/connection.ts';
 import { sseBus } from '../lib/sse.ts';
-import { getSecret } from './secret.service.ts';
 import { createStandaloneCalendarEvent, type CalendarEventRow } from './alarm-calendar.service.ts';
 
 const MAX_ZIP_UNCOMPRESSED_BYTES = 10 * 1024 * 1024; // 10 MB anti-zip-bomb limit
 
 export type WaTopicCategory = 'tugas_kuliah' | 'skripsi' | 'rapat_organisasi' | 'ajakan_pergi' | 'umum';
 export type WaProposalStatus = 'none' | 'pending' | 'accepted' | 'declined';
-
-const VALID_INTENTS = new Set<WaTagMentionRow['ai_intent']>([
-  'question',
-  'task_request',
-  'deadline',
-  'info',
-  'meeting_invite',
-  'unclassified',
-]);
-const VALID_URGENCIES = new Set<WaTagMentionRow['ai_urgency']>(['high', 'medium', 'low']);
 
 export interface WaTagMentionRow {
   id: string;
@@ -381,89 +370,6 @@ export function extractEventProposal(
   };
 }
 
-function checkMonthlyBudgetBlocked(): { blocked: boolean } {
-  const db = getDb();
-  const monthPrefix = todayWibIsoDate().slice(0, 7);
-  const row = db
-    .prepare("SELECT COALESCE(SUM(estimated_cost_usd), 0) AS spent FROM ai_usage_ledger WHERE created_at LIKE ?")
-    .get(`${monthPrefix}%`) as { spent: number };
-  const capRow = db.prepare("SELECT value_json FROM app_settings WHERE key = 'ai_monthly_budget_usd'").get() as
-    | { value_json: string }
-    | undefined;
-  const cap = capRow ? Number(JSON.parse(capRow.value_json)) : 10.0;
-  return { blocked: row.spent >= cap };
-}
-
-async function classifyTagWithOptionalGemini(
-  quoted: string,
-  contextBefore: string,
-  contextAfter: string,
-): Promise<{ intent: WaTagMentionRow['ai_intent']; urgency: WaTagMentionRow['ai_urgency']; usedGemini: boolean }> {
-  const db = getDb();
-  const paidRow = db.prepare("SELECT value_json FROM app_settings WHERE key = 'paid_billing_verified'").get() as
-    | { value_json: string }
-    | undefined;
-  const paidVerified = paidRow ? Boolean(JSON.parse(paidRow.value_json)) : false;
-  const geminiKey = getSecret('GEMINI_API_KEY');
-  const budget = checkMonthlyBudgetBlocked();
-
-  if (!paidVerified || !geminiKey || budget.blocked) {
-    const rb = classifyTagRuleBased(quoted);
-    return { ...rb, usedGemini: false };
-  }
-
-  const safeSnippet = scrubPiiForLlm(`Before: ${contextBefore}\nTarget: ${quoted}\nAfter: ${contextAfter}`);
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Classify this WhatsApp group mention into JSON {"intent":"question|task_request|deadline|info|meeting_invite","urgency":"high|medium|low"}.\n${safeSnippet}`,
-                },
-              ],
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(5000),
-      },
-    );
-    if (res.ok) {
-      const json = (await res.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-        usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
-      };
-      const inTok = json.usageMetadata?.promptTokenCount ?? 150;
-      const outTok = json.usageMetadata?.candidatesTokenCount ?? 40;
-      const cost = inTok * 0.00000015 + outTok * 0.0000006;
-      db.prepare(
-        `INSERT INTO ai_usage_ledger (id, provider, model, feature, prompt_tokens, completion_tokens, estimated_cost_usd)
-         VALUES (?, 'gemini', 'gemini-2.5-flash', 'wa_classify', ?, ?, ?)`,
-      ).run(`ai_${crypto.randomUUID().slice(0, 8)}`, inTok, outTok, cost);
-
-      const raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      const m = raw.match(/\{[\s\S]*?\}/);
-      if (m) {
-        const parsed = JSON.parse(m[0]) as { intent?: WaTagMentionRow['ai_intent']; urgency?: WaTagMentionRow['ai_urgency'] };
-        if (parsed.intent && VALID_INTENTS.has(parsed.intent) && parsed.urgency && VALID_URGENCIES.has(parsed.urgency)) {
-          return { intent: parsed.intent, urgency: parsed.urgency, usedGemini: true };
-        }
-      }
-    }
-  } catch {
-    // Fallback to deterministic classifier
-  }
-
-  const rb = classifyTagRuleBased(quoted);
-  return { ...rb, usedGemini: false };
-}
-
 export async function importWhatsAppExport(input: {
   groupName: string;
   fileName: string;
@@ -496,7 +402,6 @@ export async function importWhatsAppExport(input: {
   let matchedTags = 0;
   let insertedNew = 0;
   let skippedDuplicates = 0;
-  let geminiCallsMade = 0;
 
   const existsStmt = db.prepare('SELECT 1 FROM wa_tag_mentions WHERE content_hash = ?');
   const insertStmt = db.prepare(
@@ -517,7 +422,6 @@ export async function importWhatsAppExport(input: {
       .update(`${input.groupName}|${msg.timestamp}|${msg.sender}|${msg.text}`)
       .digest('hex');
 
-    // Deduplicate BEFORE invoking optional Gemini classification to save cost & respect rate limits
     if (existsStmt.get(hash)) {
       skippedDuplicates++;
       continue;
@@ -536,8 +440,7 @@ export async function importWhatsAppExport(input: {
       .slice(i + 1, Math.min(lines.length, i + 4))
       .some((x) => x.sender.toLowerCase().includes('arthur'));
 
-    const classified = await classifyTagWithOptionalGemini(msg.text, before, after);
-    if (classified.usedGemini) geminiCallsMade++;
+    const classified = classifyTagRuleBased(msg.text);
 
     const topic = detectTopicCategory(msg.text, input.groupName);
     const proposal = extractEventProposal(msg.text, topic, input.groupName, msg.sender);
@@ -574,7 +477,7 @@ export async function importWhatsAppExport(input: {
     matchedTags,
     insertedNew,
     skippedDuplicates,
-    geminiCallsMade,
+    geminiCallsMade: 0,
     mentions: listWaTagMentions(),
   };
 }

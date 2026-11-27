@@ -587,7 +587,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   }
   if (method === 'POST' && pathname === '/api/composio/tools/execute') {
     const body = await readJsonBody<{ toolSlug: string; arguments?: Record<string, unknown> }>(req);
-    const out = await executeComposioTool(body.toolSlug, body.arguments ?? {});
+    const out = await executeComposioTool(body?.toolSlug, body?.arguments === undefined ? {} : body.arguments);
     if (!out.ok) sendError(res, 400, out.error ?? out.summary);
     else sendJson(res, 200, out);
     return true;
@@ -629,7 +629,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   if (method === 'POST' && /^\/api\/agent\/audit\/[^/]+\/approve$/.test(pathname)) {
     const auditId = pathname.split('/')[4];
     const body = await readJsonBody<{ editedArgs?: Record<string, unknown> }>(req);
-    const resAudit = await approveAuditAction(auditId, body.editedArgs);
+    const resAudit = await approveAuditAction(auditId, body?.editedArgs);
     if (!resAudit) sendError(res, 404, 'Pending audit not found');
     else sendJson(res, 200, resAudit);
     return true;

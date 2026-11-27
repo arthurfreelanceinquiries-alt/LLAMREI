@@ -60,21 +60,20 @@ export interface UnifiedModelResult {
   promptTokens: number;
   completionTokens: number;
   isFreeTier: boolean;
+  actualCostUsd?: number;
   attempts: ProviderAttempt[];
 }
 
 export interface AiInvocationOptions {
   providerOverride?: AiProviderId;
   modelOverride?: string;
-  isSensitiveWaContext?: boolean;
+  containsPrivateContext?: boolean;
   fetchImpl?: typeof fetch;
-  cliRunner?: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
 }
 
 const OPENCODE_MODELS_CATALOG_URL = 'https://opencode.ai/zen/v1/models';
-const OPENCODE_OPENAI_BASE = 'https://opencode.ai/inference/openai/v1';
+const OPENCODE_OPENAI_BASE = 'https://opencode.ai/zen/v1';
 const OPENROUTER_OPENAI_BASE = 'https://openrouter.ai/api/v1';
-const GROQ_OPENAI_BASE = 'https://api.groq.com/openai/v1';
 
 const FALLBACK_OPENCODE_FREE_MODELS: AiModelOption[] = [
   { id: 'big-pickle', name: 'Big Pickle (Free)', provider: 'opencode_zen', isFree: true, supportsTools: true, contextLimit: 200000, note: 'Reasoning & tool use gratis' },
@@ -134,6 +133,7 @@ export function getAiSettingsSnapshot(): {
   ollamaModel: string;
   geminiModel: string;
   paidBillingVerified: boolean;
+  allowCloudChatContext: boolean;
   allowCliFallback: boolean;
   fallbackChain: Array<Exclude<AiProviderId, 'auto' | 'local'>>;
 } {
@@ -184,7 +184,8 @@ export function getAiSettingsSnapshot(): {
     ollamaBaseUrl: readSetting<string>('ollama_base_url', 'http://127.0.0.1:11434/v1').replace(/\/+$/, ''),
     ollamaModel: readSetting<string>('ollama_model', 'qwen2.5:7b'),
     geminiModel: readSetting<string>('ai_model', 'gemini-2.5-flash'),
-    paidBillingVerified: Boolean(readSetting<boolean>('paid_billing_verified', false)),
+    paidBillingVerified: readSetting<boolean>('paid_billing_verified', false) === true,
+    allowCloudChatContext: readSetting<boolean>('ai_allow_cloud_chat_context', false) === true,
     allowCliFallback: Boolean(readSetting<boolean>('allow_opencode_cli_fallback', false)),
     fallbackChain: fallbackChain.length > 0 ? fallbackChain : defaultChain,
   };
@@ -196,6 +197,7 @@ export function parseOpenCodeCatalogJson(payload: unknown): AiModelOption[] {
   const models: AiModelOption[] = [];
 
   for (const item of data) {
+    if (!item || typeof item !== 'object') continue;
     const m = item as {
       id?: string;
       name?: string;
@@ -203,13 +205,17 @@ export function parseOpenCodeCatalogJson(payload: unknown): AiModelOption[] {
       description?: string;
       capabilities?: { tools?: { supported?: boolean } };
       limit?: { context?: number };
-      cost?: { text?: { input?: { price?: number }; output?: { price?: number } } };
+      cost?: Record<string, Record<string, { price?: number }>>;
     };
-    if (!m.id || m.type !== 'chat') continue;
+    if (typeof m.id !== 'string' || !m.id || m.type !== 'chat') continue;
     const inPrice = m.cost?.text?.input?.price;
     const outPrice = m.cost?.text?.output?.price;
-    const isFree = (inPrice === 0 && outPrice === 0) || m.id.endsWith('-free') || m.id === 'big-pickle';
-    if (!isFree) continue;
+    if (inPrice !== 0 || outPrice !== 0) continue;
+    const hasVerifiedCost = Object.values(m.cost ?? {}).every((category) =>
+      category && typeof category === 'object' && !Array.isArray(category) &&
+      Object.values(category).every((meter) => meter?.price === 0),
+    );
+    if (!hasVerifiedCost) continue;
 
     models.push({
       id: m.id,
@@ -229,23 +235,31 @@ export async function fetchLiveOpenCodeFreeModels(
   forceRefresh = false,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<{ models: AiModelOption[]; liveFetched: boolean }> {
-  if (!forceRefresh && cachedOpenCodeFreeModels && Date.now() - cachedOpenCodeFreeModels.fetchedAt < 15 * 60_000) {
+  if (!forceRefresh && fetchImpl === globalThis.fetch && cachedOpenCodeFreeModels &&
+      Date.now() - cachedOpenCodeFreeModels.fetchedAt < 60_000) {
     return { models: cachedOpenCodeFreeModels.models, liveFetched: true };
   }
   try {
-    const res = await fetchImpl(OPENCODE_MODELS_CATALOG_URL, { signal: AbortSignal.timeout(4000) });
+    const res = await fetchImpl(OPENCODE_MODELS_CATALOG_URL, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(4000),
+    });
     if (res.ok) {
       const json = await res.json();
       const parsed = parseOpenCodeCatalogJson(json);
       if (parsed.length > 0) {
-        cachedOpenCodeFreeModels = { fetchedAt: Date.now(), models: parsed };
+        if (fetchImpl === globalThis.fetch) cachedOpenCodeFreeModels = { fetchedAt: Date.now(), models: parsed };
         return { models: parsed, liveFetched: true };
       }
     }
   } catch {
     // Offline or timeout — return curated list
   }
-  return { models: FALLBACK_OPENCODE_FREE_MODELS, liveFetched: false };
+  return { models: FALLBACK_OPENCODE_FREE_MODELS.map((model) => ({
+    ...model,
+    isFree: false,
+    note: 'Harga belum diverifikasi',
+  })), liveFetched: false };
 }
 
 export async function fetchLiveOllamaModels(
@@ -321,11 +335,11 @@ export async function getAiProvidersCatalog(
     isOpenCodeCliAvailable(),
   ]);
 
-  const cliModels: AiModelOption[] = openCodeRes.models.map((m) => ({
-    ...m,
-    provider: 'opencode_cli',
-    note: `Via opencode run CLI (${m.id})`,
-  }));
+  const unverifiedPricing = (models: AiModelOption[]): AiModelOption[] =>
+    models.map((model) => ({ ...model, isFree: false, note: 'Harga belum diverifikasi' }));
+  const cliModels = unverifiedPricing(openCodeRes.models).map(
+    (model): AiModelOption => ({ ...model, provider: 'opencode_cli' }),
+  );
 
   return {
     activeProvider: cfg.provider,
@@ -336,15 +350,15 @@ export async function getAiProvidersCatalog(
         id: 'opencode_zen',
         label: 'OpenCode Zen (Free Models API)',
         configured: Boolean(getSecret('OPENCODE_API_KEY')),
-        isFreePrimary: true,
+        isFreePrimary: openCodeRes.liveFetched && openCodeRes.models.some((model) => model.id === cfg.opencodeModel),
         selectedModel: cfg.opencodeModel,
         models: openCodeRes.models,
       },
       {
         id: 'opencode_cli',
-        label: 'OpenCode CLI Lokal (Gratis via CLI)',
+        label: 'OpenCode CLI (Harga Belum Terverifikasi)',
         configured: cliAvail,
-        isFreePrimary: true,
+        isFreePrimary: false,
         selectedModel: cfg.opencodeModel,
         models: cliModels,
       },
@@ -352,33 +366,33 @@ export async function getAiProvidersCatalog(
         id: 'openrouter',
         label: 'OpenRouter (:free Pool)',
         configured: Boolean(getSecret('OPENROUTER_API_KEY')),
-        isFreePrimary: true,
+        isFreePrimary: false,
         selectedModel: cfg.openrouterModel,
-        models: CURATED_OPENROUTER_FREE_MODELS,
+        models: unverifiedPricing(CURATED_OPENROUTER_FREE_MODELS),
       },
       {
         id: 'groq',
-        label: 'Groq LPU (Free Fast Tier)',
+        label: 'Groq LPU (Harga Belum Terverifikasi)',
         configured: Boolean(getSecret('GROQ_API_KEY')),
-        isFreePrimary: true,
+        isFreePrimary: false,
         selectedModel: cfg.groqModel,
-        models: CURATED_GROQ_FREE_MODELS,
+        models: unverifiedPricing(CURATED_GROQ_FREE_MODELS),
       },
       {
         id: 'ollama',
         label: 'Ollama Lokal (Offline 100% Gratis)',
         configured: ollamaRes.online,
-        isFreePrimary: true,
+        isFreePrimary: isLoopbackModelEndpoint(cfg.ollamaBaseUrl),
         selectedModel: cfg.ollamaModel,
-        models: ollamaRes.models,
+        models: isLoopbackModelEndpoint(cfg.ollamaBaseUrl) ? ollamaRes.models : unverifiedPricing(ollamaRes.models),
       },
       {
         id: 'gemini',
         label: 'Google Gemini (AI Studio)',
         configured: Boolean(getSecret('GEMINI_API_KEY')),
-        isFreePrimary: true,
+        isFreePrimary: false,
         selectedModel: cfg.geminiModel,
-        models: CURATED_GEMINI_MODELS,
+        models: unverifiedPricing(CURATED_GEMINI_MODELS),
       },
     ],
   };
@@ -390,57 +404,71 @@ export function getAiBudgetSummary(): {
   remainingUsd: number;
   blocked: boolean;
   callsCount: number;
+  actualSpentUsd: number;
+  estimatedSpentUsd: number;
 } {
   const db = getDb();
   const monthPrefix = todayWibIsoDate().slice(0, 7);
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS spent, COUNT(*) AS cnt
-       FROM ai_usage_ledger WHERE created_at LIKE ?`,
-    )
-    .get(`${monthPrefix}%`) as { spent: number; cnt: number };
+  const row = db.prepare(
+    `SELECT COALESCE(SUM(actual_cost_usd), 0) AS actual,
+            COALESCE(SUM(CASE WHEN actual_cost_usd IS NULL THEN estimated_cost_usd ELSE 0 END), 0) AS estimated,
+            COUNT(*) AS cnt
+     FROM ai_usage_ledger WHERE strftime('%Y-%m', created_at, '+7 hours') = ?`,
+  ).get(monthPrefix) as { actual: number; estimated: number; cnt: number };
 
-  const monthlyCapUsd = Number(readSetting<number>('ai_monthly_budget_usd', 10.0));
-  const monthlySpentUsd = Math.round(row.spent * 10000) / 10000;
+  const cap = readSetting<unknown>('ai_monthly_budget_usd', 10.0);
+  const monthlyCapUsd = typeof cap === 'number' && Number.isFinite(cap) && cap >= 0 ? cap : 0;
+  const spent = row.actual + row.estimated;
   return {
-    monthlySpentUsd,
+    monthlySpentUsd: Number(spent.toFixed(4)),
     monthlyCapUsd,
-    remainingUsd: Math.max(0, Math.round((monthlyCapUsd - monthlySpentUsd) * 10000) / 10000),
-    blocked: monthlySpentUsd >= monthlyCapUsd,
+    remainingUsd: Math.max(0, Number((monthlyCapUsd - spent).toFixed(4))),
+    blocked: spent >= monthlyCapUsd,
     callsCount: row.cnt,
+    actualSpentUsd: row.actual,
+    estimatedSpentUsd: row.estimated,
   };
 }
 
-export function recordAiUsage(
-  provider: string,
-  model: string,
-  feature: string,
-  promptTokens: number,
-  completionTokens: number,
-  isFreeTier: boolean,
-): void {
-  const db = getDb();
-  let cost = 0;
-  if (!isFreeTier && provider === 'gemini') {
-    const isPro = model.includes('pro');
-    const rateIn = isPro ? 0.00000125 : 0.00000015;
-    const rateOut = isPro ? 0.000005 : 0.0000006;
-    cost = promptTokens * rateIn + completionTokens * rateOut;
-  }
-  db.prepare(
-    `INSERT INTO ai_usage_ledger (id, provider, model, feature, prompt_tokens, completion_tokens, estimated_cost_usd)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(`ai_${crypto.randomUUID().slice(0, 8)}`, provider, model, feature, promptTokens, completionTokens, cost);
+function recordAiUsage(result: Omit<UnifiedModelResult, 'attempts'>): void {
+  getDb().prepare(
+    `INSERT INTO ai_usage_ledger
+       (id, provider, model, feature, prompt_tokens, completion_tokens, estimated_cost_usd, actual_cost_usd)
+     VALUES (?, ?, ?, 'agent', ?, ?, 0, ?)`,
+  ).run(
+    `ai_${crypto.randomUUID()}`,
+    result.providerUsed,
+    result.modelUsed,
+    result.promptTokens,
+    result.completionTokens,
+    result.actualCostUsd ?? null,
+  );
 }
 
-function isModelFree(provider: Exclude<AiProviderId, 'auto' | 'local'>, model: string): boolean {
-  if (provider === 'opencode_zen' || provider === 'opencode_cli' || provider === 'ollama' || provider === 'groq') {
-    return true;
-  }
-  if (provider === 'openrouter') {
-    return model.includes(':free');
-  }
-  return !model.includes('pro');
+function acceptsZeroUsd(value: unknown): boolean {
+  return value === 0 || (typeof value === 'string' && /^0(?:\.0+)?$/.test(value));
+}
+
+async function hasVerifiedFreeOpenRouterModel(model: string, fetchImpl: typeof fetch): Promise<boolean> {
+  if (!model.endsWith(':free')) return false;
+  const res = await fetchImpl(`${OPENROUTER_OPENAI_BASE}/models`, {
+    redirect: 'error',
+    signal: AbortSignal.timeout(4000),
+  });
+  if (!res.ok) return false;
+  const payload = await res.json() as { data?: Array<{ id?: string; pricing?: Record<string, unknown> }> };
+  if (!Array.isArray(payload?.data)) return false;
+  const matches = payload.data.filter((item) => item?.id === model);
+  if (matches.length !== 1) return false;
+  const pricing = matches[0].pricing;
+  if (!pricing || !acceptsZeroUsd(pricing.prompt) || !acceptsZeroUsd(pricing.completion)) return false;
+  return Object.entries(pricing).every(([meter, value]) =>
+    meter === 'overrides' ? Array.isArray(value) && value.length === 0 : acceptsZeroUsd(value),
+  );
+}
+
+function providerTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 function normalizeSchemaForOpenAi(schema: Record<string, unknown>): Record<string, unknown> {
@@ -452,24 +480,8 @@ function normalizeSchemaForOpenAi(schema: Record<string, unknown>): Record<strin
   };
 }
 
-function convertSchemaTypeToGemini(raw: unknown): unknown {
-  if (Array.isArray(raw)) return raw.map(convertSchemaTypeToGemini);
-  if (!raw || typeof raw !== 'object') return raw;
-  const obj = raw as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'additionalProperties' || k === '$schema' || k === 'default') continue;
-    if (k === 'type' && typeof v === 'string') {
-      out[k] = v.toUpperCase();
-    } else {
-      out[k] = convertSchemaTypeToGemini(v);
-    }
-  }
-  return out;
-}
-
 async function callOpenAiCompatibleProvider(params: {
-  provider: 'opencode_zen' | 'openrouter' | 'groq' | 'ollama';
+  provider: 'opencode_zen' | 'openrouter' | 'ollama';
   baseUrl: string;
   apiKey: string | null;
   model: string;
@@ -506,6 +518,13 @@ async function callOpenAiCompatibleProvider(params: {
     temperature: 0.3,
   };
 
+  if (params.provider === 'openrouter') {
+    payload.provider = {
+      allow_fallbacks: false,
+      max_price: { prompt: '0', completion: '0', request: '0', image: '0', audio: '0' },
+    };
+  }
+
   if (params.tools.length > 0) {
     payload.tools = params.tools.map((t) => ({
       type: 'function',
@@ -526,6 +545,7 @@ async function callOpenAiCompatibleProvider(params: {
 
   const res = await params.fetchImpl(`${params.baseUrl}/chat/completions`, {
     method: 'POST',
+    redirect: 'error',
     headers,
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(20000),
@@ -546,7 +566,7 @@ async function callOpenAiCompatibleProvider(params: {
         }>;
       };
     }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
   };
 
   const msg = json.choices?.[0]?.message;
@@ -574,119 +594,11 @@ async function callOpenAiCompatibleProvider(params: {
     toolCalls,
     providerUsed: params.provider,
     modelUsed: params.model,
-    promptTokens: json.usage?.prompt_tokens ?? 250,
-    completionTokens: json.usage?.completion_tokens ?? 120,
-    isFreeTier: isModelFree(params.provider, params.model),
-  };
-}
-
-async function callGeminiProvider(params: {
-  apiKey: string;
-  model: string;
-  messages: UnifiedMessage[];
-  tools: UnifiedToolDef[];
-  fetchImpl: typeof fetch;
-}): Promise<Omit<UnifiedModelResult, 'attempts'>> {
-  const sysMsg = params.messages.find((m) => m.role === 'system')?.content ?? '';
-  const contents: Array<Record<string, unknown>> = [];
-
-  for (const m of params.messages) {
-    if (m.role === 'system') continue;
-    if (m.role === 'user') {
-      contents.push({ role: 'user', parts: [{ text: m.content }] });
-    } else if (m.role === 'assistant') {
-      const parts: Array<Record<string, unknown>> = [];
-      if (m.content) parts.push({ text: m.content });
-      for (const tc of m.toolCalls ?? []) {
-        parts.push({ functionCall: { name: tc.name, args: tc.args } });
-      }
-      if (parts.length > 0) contents.push({ role: 'model', parts });
-    } else if (m.role === 'tool') {
-      let respObj: unknown = m.content;
-      try {
-        respObj = JSON.parse(m.content);
-      } catch {
-        respObj = { result: m.content };
-      }
-      contents.push({
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: m.toolName ?? 'tool',
-              response: typeof respObj === 'object' && respObj !== null ? respObj : { result: respObj },
-            },
-          },
-        ],
-      });
-    }
-  }
-
-  const body: Record<string, unknown> = {
-    ...(sysMsg ? { systemInstruction: { parts: [{ text: sysMsg }] } } : {}),
-    contents,
-  };
-
-  if (params.tools.length > 0) {
-    body.tools = [
-      {
-        functionDeclarations: params.tools.map((t) => ({
-          name: t.name,
-          description: t.description.slice(0, 500),
-          parameters: convertSchemaTypeToGemini(normalizeSchemaForOpenAi(t.parameters)),
-        })),
-      },
-    ];
-  }
-
-  const res = await params.fetchImpl(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(params.model)}:generateContent?key=${encodeURIComponent(params.apiKey)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(18000),
-    },
-  );
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status} (${errText.slice(0, 120)})`);
-  }
-
-  const data = (await res.json()) as {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{
-          text?: string;
-          functionCall?: { name: string; args?: Record<string, unknown> };
-        }>;
-      };
-    }>;
-    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
-  };
-
-  const parts = data.candidates?.[0]?.content?.parts ?? [];
-  const toolCalls: UnifiedToolCall[] = parts
-    .filter((p) => Boolean(p.functionCall?.name))
-    .map((p) => ({
-      id: `gem_${crypto.randomUUID().slice(0, 8)}`,
-      name: p.functionCall!.name,
-      args: p.functionCall!.args ?? {},
-    }));
-  const text = parts
-    .map((p) => p.text ?? '')
-    .join('\n')
-    .trim();
-
-  return {
-    text,
-    toolCalls,
-    providerUsed: 'gemini',
-    modelUsed: params.model,
-    promptTokens: data.usageMetadata?.promptTokenCount ?? 300,
-    completionTokens: data.usageMetadata?.candidatesTokenCount ?? 150,
-    isFreeTier: isModelFree('gemini', params.model),
+    promptTokens: providerTokenCount(json.usage?.prompt_tokens),
+    completionTokens: providerTokenCount(json.usage?.completion_tokens),
+    isFreeTier: true,
+    actualCostUsd: params.provider === 'openrouter' && typeof json.usage?.cost === 'number' &&
+      Number.isFinite(json.usage.cost) && json.usage.cost >= 0 ? json.usage.cost : undefined,
   };
 }
 
@@ -709,36 +621,15 @@ export function parseOpenCodeCliJsonLines(stdout: string): string {
   return texts.join('\n').trim() || stdout.trim();
 }
 
-async function callOpenCodeCliProvider(params: {
-  model: string;
-  messages: UnifiedMessage[];
-  cliRunner?: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
-}): Promise<Omit<UnifiedModelResult, 'attempts'>> {
-  const sysMsg = params.messages.find((m) => m.role === 'system')?.content ?? '';
-  const transcript = params.messages
-    .filter((m) => m.role !== 'system')
-    .slice(-8)
-    .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
-    .join('\n\n');
-  const fullPrompt = `${sysMsg ? `${sysMsg}\n\n` : ''}${transcript}`;
-  const modelFlag = params.model.includes('/') ? params.model : `opencode/${params.model}`;
-
-  const runner =
-    params.cliRunner ??
-    ((args: string[]) => execFileAsync('opencode', args, { timeout: 25000, maxBuffer: 2 * 1024 * 1024 }));
-  const { stdout } = await runner(['run', '--model', modelFlag, '--format', 'json', fullPrompt]);
-  const text = parseOpenCodeCliJsonLines(stdout);
-  if (!text) throw new Error('OpenCode CLI returned empty output');
-
-  return {
-    text,
-    toolCalls: [],
-    providerUsed: 'opencode_cli',
-    modelUsed: modelFlag,
-    promptTokens: Math.ceil(fullPrompt.length / 4),
-    completionTokens: Math.ceil(text.length / 4),
-    isFreeTier: true,
-  };
+function isLoopbackModelEndpoint(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint);
+    return (url.protocol === 'http:' || url.protocol === 'https:') &&
+      !url.username && !url.password &&
+      ['127.0.0.1', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export async function invokeAiWithFallback(
@@ -749,7 +640,6 @@ export async function invokeAiWithFallback(
   const cfg = getAiSettingsSnapshot();
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const activeProvider = options.providerOverride ?? cfg.provider;
-  const budget = getAiBudgetSummary();
 
   if (activeProvider === 'local') return null;
 
@@ -761,35 +651,42 @@ export async function invokeAiWithFallback(
   const attempts: ProviderAttempt[] = [];
 
   for (const prov of candidateOrder) {
-    // Privacy gate for WhatsApp context on cloud free-tier when paid_billing_verified is false
-    if (options.isSensitiveWaContext && !cfg.paidBillingVerified && prov !== 'ollama') {
+    if (options.containsPrivateContext && !cfg.allowCloudChatContext &&
+        (prov !== 'ollama' || !isLoopbackModelEndpoint(cfg.ollamaBaseUrl))) {
       attempts.push({
         provider: prov,
         model: '-',
         ok: false,
-        reason: 'Blocked for WA context until paid_billing_verified is enabled (privacy guard)',
+        reason: 'Private conversation context requires local Ollama or explicit cloud consent',
       });
       continue;
     }
 
-    if (prov === 'gemini' && budget.blocked && !isModelFree('gemini', options.modelOverride ?? cfg.geminiModel)) {
-      attempts.push({ provider: 'gemini', model: cfg.geminiModel, ok: false, reason: 'Monthly budget cap reached' });
-      continue;
-    }
+    const configuredModel = {
+      opencode_zen: cfg.opencodeModel,
+      opencode_cli: cfg.opencodeModel,
+      openrouter: cfg.openrouterModel,
+      groq: cfg.groqModel,
+      ollama: cfg.ollamaModel,
+      gemini: cfg.geminiModel,
+    }[prov];
+    const model = (activeProvider !== 'auto' && options.modelOverride) || configuredModel;
 
     try {
-      let result: Omit<UnifiedModelResult, 'attempts'> | null = null;
-      const chosenModel = options.modelOverride && activeProvider !== 'auto' ? options.modelOverride : undefined;
-
+      let result: Omit<UnifiedModelResult, 'attempts'>;
       if (prov === 'opencode_zen') {
         const key = getSecret('OPENCODE_API_KEY');
-        const model = chosenModel ?? cfg.opencodeModel;
         if (!key) {
           attempts.push({ provider: prov, model, ok: false, reason: 'OPENCODE_API_KEY not configured' });
           continue;
         }
+        const catalog = await fetchLiveOpenCodeFreeModels(false, fetchImpl);
+        if (!catalog.liveFetched || !catalog.models.some((item) => item.id === model)) {
+          attempts.push({ provider: prov, model, ok: false, reason: 'OpenCode catalog did not verify zero cost' });
+          continue;
+        }
         result = await callOpenAiCompatibleProvider({
-          provider: 'opencode_zen',
+          provider: prov,
           baseUrl: OPENCODE_OPENAI_BASE,
           apiKey: key,
           model,
@@ -799,44 +696,30 @@ export async function invokeAiWithFallback(
         });
       } else if (prov === 'openrouter') {
         const key = getSecret('OPENROUTER_API_KEY');
-        const model = chosenModel ?? cfg.openrouterModel;
         if (!key) {
           attempts.push({ provider: prov, model, ok: false, reason: 'OPENROUTER_API_KEY not configured' });
           continue;
         }
+        const unexpectedCost = getDb().prepare(
+          'SELECT 1 FROM ai_usage_ledger WHERE provider = ? AND model = ? AND actual_cost_usd > 0 LIMIT 1',
+        ).get(prov, model);
+        if (unexpectedCost || !await hasVerifiedFreeOpenRouterModel(model, fetchImpl)) {
+          attempts.push({ provider: prov, model, ok: false, reason: 'OpenRouter route did not verify zero cost' });
+          continue;
+        }
         result = await callOpenAiCompatibleProvider({
-          provider: 'openrouter',
+          provider: prov,
           baseUrl: OPENROUTER_OPENAI_BASE,
           apiKey: key,
           model,
           messages,
           tools,
-          extraHeaders: {
-            'HTTP-Referer': 'http://localhost:5173',
-            'X-Title': 'Llamrei Jarvis OS',
-          },
+          extraHeaders: { 'HTTP-Referer': 'http://localhost:5173', 'X-Title': 'Llamrei Jarvis OS' },
           fetchImpl,
         });
-      } else if (prov === 'groq') {
-        const key = getSecret('GROQ_API_KEY');
-        const model = chosenModel ?? cfg.groqModel;
-        if (!key) {
-          attempts.push({ provider: prov, model, ok: false, reason: 'GROQ_API_KEY not configured' });
-          continue;
-        }
+      } else if (prov === 'ollama' && isLoopbackModelEndpoint(cfg.ollamaBaseUrl)) {
         result = await callOpenAiCompatibleProvider({
-          provider: 'groq',
-          baseUrl: GROQ_OPENAI_BASE,
-          apiKey: key,
-          model,
-          messages,
-          tools,
-          fetchImpl,
-        });
-      } else if (prov === 'ollama') {
-        const model = chosenModel ?? cfg.ollamaModel;
-        result = await callOpenAiCompatibleProvider({
-          provider: 'ollama',
+          provider: prov,
           baseUrl: cfg.ollamaBaseUrl,
           apiKey: null,
           model,
@@ -844,39 +727,21 @@ export async function invokeAiWithFallback(
           tools,
           fetchImpl,
         });
-      } else if (prov === 'gemini') {
-        const key = getSecret('GEMINI_API_KEY');
-        const model = chosenModel ?? cfg.geminiModel;
-        if (!key) {
-          attempts.push({ provider: prov, model, ok: false, reason: 'GEMINI_API_KEY not configured' });
-          continue;
-        }
-        result = await callGeminiProvider({
-          apiKey: key,
-          model,
-          messages,
-          tools,
-          fetchImpl,
-        });
-      } else if (prov === 'opencode_cli') {
-        const model = chosenModel ?? cfg.opencodeModel;
-        if (!options.cliRunner && process.env.LLAMREI_DISABLE_CLI_AI === '1') {
-          attempts.push({ provider: prov, model, ok: false, reason: 'CLI AI disabled in env' });
-          continue;
-        }
-        result = await callOpenCodeCliProvider({
-          model,
-          messages,
-          cliRunner: options.cliRunner,
-        });
+      } else {
+        attempts.push({ provider: prov, model, ok: false, reason: 'No verified zero-cost route' });
+        continue;
       }
 
-      if (result && (result.text || result.toolCalls.length > 0)) {
+      recordAiUsage(result);
+      if (result.actualCostUsd && result.actualCostUsd > 0) {
+        attempts.push({ provider: prov, model, ok: false, reason: 'Provider reported an unexpected charge' });
+        continue;
+      }
+      if (result.text || result.toolCalls.length > 0) {
         attempts.push({ provider: prov, model: result.modelUsed, ok: true });
-        recordAiUsage(prov, result.modelUsed, 'agent', result.promptTokens, result.completionTokens, result.isFreeTier);
         return { ...result, attempts };
       }
-      attempts.push({ provider: prov, model: chosenModel ?? '-', ok: false, reason: 'Empty response' });
+      attempts.push({ provider: prov, model, ok: false, reason: 'Empty response' });
     } catch (err) {
       attempts.push({
         provider: prov,
