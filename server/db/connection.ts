@@ -36,41 +36,41 @@ export function initDatabase(dbPath?: string): DatabaseSync {
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec('PRAGMA busy_timeout = 5000;');
 
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    applyMigrations(db);
+    seedInitialData(db);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    db.close();
+    throw error;
+  }
+  activeDb = db;
+  return db;
+}
+
+function applyMigrations(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       filename TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
-
-  const appliedSet = new Set(
-    (db.prepare('SELECT filename FROM schema_migrations').all() as Array<{ filename: string }>).map((r) => r.filename),
+  const applied = new Set(
+    (db.prepare('SELECT filename FROM schema_migrations').all() as Array<{ filename: string }>).map(({ filename }) => filename),
   );
-
-  const migrationFiles = fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-
+  const files = fs.readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith('.sql')).sort();
   const recordMigration = db.prepare('INSERT INTO schema_migrations (filename) VALUES (?)');
-  for (const file of migrationFiles) {
-    if (appliedSet.has(file)) continue;
-    // Legacy compatibility if 001 was already applied before schema_migrations existed
-    if (file === '001_llamrei_v2_core.sql') {
-      const hasSpaces = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='spaces'").get();
-      if (hasSpaces) {
-        recordMigration.run(file);
-        continue;
-      }
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const alreadyAppliedBeforeTracking = file === '001_llamrei_v2_core.sql' &&
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='spaces'").get();
+    if (!alreadyAppliedBeforeTracking) {
+      db.exec(fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8'));
     }
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
-    db.exec(sql);
     recordMigration.run(file);
   }
-
-  seedInitialData(db);
-  activeDb = db;
-  return db;
 }
 
 export function getDb(): DatabaseSync {
@@ -360,7 +360,7 @@ function seedInitialData(db: DatabaseSync): void {
   insSetting.run('ai_monthly_budget_usd', JSON.stringify(10.0));
   insSetting.run('paid_billing_verified', JSON.stringify(false));
   insSetting.run('allow_opencode_cli_fallback', JSON.stringify(false));
-  insSetting.run('composio_user_id', JSON.stringify('arthur_reezan'));
+  insSetting.run('composio_user_id', JSON.stringify('llamrei_local'));
   insSetting.run('composio_enabled_toolkits', JSON.stringify(['gmail', 'googlecalendar', 'googledocs', 'googlesheets', 'notion', 'github']));
   insSetting.run('deep_work_window', JSON.stringify({ startHour: 8, endHour: 22 }));
   insSetting.run('watchlist', JSON.stringify(['OANDA:XAUUSD', 'FX:EURUSD', 'BINANCE:BTCUSDT', 'TVC:DXY']));

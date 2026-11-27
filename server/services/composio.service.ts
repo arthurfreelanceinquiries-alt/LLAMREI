@@ -1,3 +1,6 @@
+import { createRequire } from 'node:module';
+import { Ajv, type ValidateFunction } from 'ajv';
+import type { FormatsPlugin } from 'ajv-formats';
 import { getDb } from '../db/connection.ts';
 import { sseBus } from '../lib/sse.ts';
 import { getSecret } from './secret.service.ts';
@@ -5,6 +8,9 @@ import type { UnifiedToolDef } from './ai-provider.service.ts';
 
 const COMPOSIO_API_V3 = 'https://backend.composio.dev/api/v3';
 const COMPOSIO_API_V3_1 = 'https://backend.composio.dev/api/v3.1';
+const addFormats = createRequire(import.meta.url)('ajv-formats') as FormatsPlugin;
+const validators = new WeakMap<Record<string, unknown>, ValidateFunction>();
+const APPROVAL_WINDOW_MINUTES = 15;
 
 export interface ComposioToolkitItem {
   slug: string;
@@ -86,9 +92,9 @@ function getComposioUserId(): string {
     const row = db.prepare("SELECT value_json FROM app_settings WHERE key = 'composio_user_id'").get() as
       | { value_json: string }
       | undefined;
-    return row ? String(JSON.parse(row.value_json)) : 'arthur_reezan';
+    return row ? String(JSON.parse(row.value_json)) : 'llamrei_local';
   } catch {
-    return 'arthur_reezan';
+    return 'llamrei_local';
   }
 }
 
@@ -103,7 +109,7 @@ export function getEnabledComposioToolkits(): string[] {
   } catch {
     // fallback
   }
-  return ['gmail', 'googlecalendar', 'googledocs', 'googlesheets', 'notion', 'github'];
+  return [];
 }
 
 export function setEnabledComposioToolkits(slugs: string[]): string[] {
@@ -117,16 +123,14 @@ export function setEnabledComposioToolkits(slugs: string[]): string[] {
   return clean;
 }
 
-/**
- * Classifies whether a Composio action slug is safe read-only (auto-executable inside ReAct loop)
- * or mutating/outbound (must pause at an Approval Card before execution).
- */
+// Only reviewed read operations can execute without a one-time approval.
+const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  'GMAIL_FETCH_EMAILS',
+  'GITHUB_LIST_ISSUES',
+]);
+
 export function isReadOnlyComposioTool(toolSlug: string): boolean {
-  const upper = toolSlug.toUpperCase();
-  if (/(SEND|CREATE|UPDATE|DELETE|REMOVE|POST|WRITE|REPLY|PATCH|PUT|EXECUTE|DISPATCH|PUBLISH|UPLOAD|ADD|INSERT|MODIFY|ARCHIVE|CANCEL|REVOKE)/.test(upper)) {
-    return false;
-  }
-  return /(^|_)(GET|LIST|FETCH|SEARCH|FIND|READ|CHECK|VIEW|PROFILE|INFO|SUMMARY|QUERY)(_|$)/.test(upper);
+  return READ_ONLY_TOOLS.has(toolSlug);
 }
 
 function getComposioHeaders(apiKey: string): Record<string, string> {
@@ -498,7 +502,7 @@ export async function listToolkitTools(
 
   try {
     const res = await fetchImpl(
-      `${COMPOSIO_API_V3_1}/tools?toolkit_slug=${encodeURIComponent(slug)}&toolkit_versions=latest&limit=${Math.min(30, limit)}`,
+      `${COMPOSIO_API_V3_1}/tools?toolkit_slug=${encodeURIComponent(slug)}&toolkit_versions=latest&limit=${30}`,
       {
         headers: getComposioHeaders(apiKey),
         signal: AbortSignal.timeout(8000),
@@ -515,14 +519,14 @@ export async function listToolkitTools(
       }>;
     };
     const tools: ComposioToolItem[] = (json.items ?? [])
-      .filter((t) => Boolean(t.slug))
+      .filter((t) => typeof t.slug === 'string' && /^[A-Z0-9_]+$/.test(t.slug))
       .map((t) => ({
         slug: t.slug!,
         name: t.name || t.slug!,
         description: t.description || '',
         toolkitSlug: slug,
         readOnly: isReadOnlyComposioTool(t.slug!),
-        inputParameters: t.input_parameters ?? t.parameters ?? { type: 'object', properties: {} },
+        inputParameters: t.input_parameters ?? t.parameters ?? {},
       }));
 
     cachedToolkitTools.set(slug, { fetchedAt: Date.now(), tools });
@@ -532,29 +536,46 @@ export async function listToolkitTools(
   }
 }
 
+export interface ComposioTarget {
+  toolkitSlug: string;
+  accountId: string;
+}
+
+function activeTargets(): ComposioTarget[] {
+  const enabled = new Set(getEnabledComposioToolkits());
+  const accounts = new Map<string, Set<string>>();
+  for (const connection of listComposioConnections()) {
+    const toolkit = connection.toolkit_slug;
+    if (connection.status !== 'active' || !connection.connected_account_id || !enabled.has(toolkit)) continue;
+    const ids = accounts.get(toolkit) ?? new Set<string>();
+    ids.add(connection.connected_account_id);
+    accounts.set(toolkit, ids);
+  }
+  return [...accounts].flatMap(([toolkitSlug, ids]) =>
+    ids.size === 1 ? [{ toolkitSlug, accountId: [...ids][0] }] : [],
+  );
+}
+
+export type AgentComposioTool = UnifiedToolDef & { target: ComposioTarget };
+
 export async function getActiveComposioToolsForAgent(
   fetchImpl: typeof fetch = globalThis.fetch,
-): Promise<UnifiedToolDef[]> {
-  const apiKey = getSecret('COMPOSIO_API_KEY');
-  if (!apiKey) return [];
-
-  const activeConns = listComposioConnections().filter((c) => c.status === 'active');
-  const enabledSet = new Set(getEnabledComposioToolkits());
-  const targetSlugs = activeConns.map((c) => c.toolkit_slug).filter((s) => enabledSet.has(s)).slice(0, 4);
-  if (targetSlugs.length === 0) return [];
-
-  const allTools: UnifiedToolDef[] = [];
-  for (const slug of targetSlugs) {
-    const tools = await listToolkitTools(slug, 6, fetchImpl);
-    for (const t of tools) {
-      allTools.push({
-        name: `composio__${t.slug}`,
-        description: `[${slug.toUpperCase()}${t.readOnly ? ' · READ' : ' · WRITE/APPROVAL'}] ${t.description}`,
-        parameters: t.inputParameters,
+): Promise<AgentComposioTool[]> {
+  if (!getSecret('COMPOSIO_API_KEY')) return [];
+  const tools: AgentComposioTool[] = [];
+  for (const target of activeTargets().slice(0, 4)) {
+    const definitions = await listToolkitTools(target.toolkitSlug, 6, fetchImpl);
+    for (const tool of definitions) {
+      if (tool.inputParameters.type !== 'object') continue;
+      tools.push({
+        name: `composio__${tool.slug}`,
+        description: `[${target.toolkitSlug.toUpperCase()}${tool.readOnly ? ' · READ' : ' · APPROVAL'}] ${tool.description}`,
+        parameters: tool.inputParameters,
+        target,
       });
     }
   }
-  return allTools.slice(0, 24);
+  return tools.slice(0, 24);
 }
 
 export function summarizeToolResult(raw: unknown): string {
@@ -563,62 +584,132 @@ export function summarizeToolResult(raw: unknown): string {
   return `${str.slice(0, 2200)}... [truncated ${str.length - 2200} chars]`;
 }
 
-export async function executeComposioTool(
-  toolSlug: string,
-  args: Record<string, unknown>,
-  fetchImpl: typeof fetch = globalThis.fetch,
-): Promise<{ ok: boolean; data?: unknown; summary: string; error?: string }> {
-  const cleanSlug = toolSlug.replace(/^composio__/, '').trim().toUpperCase();
-  if (!/^[A-Z0-9_]+$/.test(cleanSlug)) {
-    return { ok: false, summary: 'Slug tool Composio tidak valid.', error: 'Invalid tool slug' };
+type ComposioResult = {
+  ok: boolean;
+  data?: unknown;
+  summary: string;
+  error?: string;
+  outcome?: 'denied' | 'failed' | 'unknown';
+};
+
+function deny(summary: string): ComposioResult {
+  return { ok: false, outcome: 'denied', summary, error: summary };
+}
+
+function validArguments(schema: Record<string, unknown>, args: unknown): boolean {
+  if (schema.type !== 'object' || schema.$async === true || !args || typeof args !== 'object' || Array.isArray(args)) return false;
+  try {
+    // Tool inputs must use declared fields. Composio schemas often omit additionalProperties.
+    let validate = validators.get(schema);
+    if (!validate) {
+      validate = addFormats(new Ajv()).compile({ ...schema, additionalProperties: false });
+      validators.set(schema, validate);
+    }
+    return validate(args) === true;
+  } catch {
+    return false;
   }
+}
+
+async function executeAuthorizedTool(
+  toolSlug: string,
+  args: unknown,
+  fetchImpl: typeof fetch,
+  approvedTarget?: ComposioTarget,
+): Promise<ComposioResult> {
+  if (typeof toolSlug !== 'string') return deny('Invalid Composio tool slug');
+  const cleanSlug = toolSlug.replace(/^composio__/, '').trim().toUpperCase();
+  if (!/^[A-Z0-9_]+$/.test(cleanSlug)) return deny('Invalid Composio tool slug');
+  if (!approvedTarget && !isReadOnlyComposioTool(cleanSlug)) return deny('Composio tool requires approval');
 
   const apiKey = getSecret('COMPOSIO_API_KEY');
-  if (!apiKey) {
-    return { ok: false, summary: 'COMPOSIO_API_KEY belum diisi.', error: 'COMPOSIO_API_KEY missing' };
+  if (!apiKey) return deny('COMPOSIO_API_KEY missing');
+
+  const targets = activeTargets().filter(({ toolkitSlug, accountId }) =>
+    cleanSlug.startsWith(`${toolkitSlug.toUpperCase()}_`) &&
+    (!approvedTarget || (toolkitSlug === approvedTarget.toolkitSlug && accountId === approvedTarget.accountId)),
+  );
+  if (targets.length !== 1) return deny('Composio requires one active account on an enabled toolkit');
+  const { toolkitSlug, accountId } = targets[0];
+  const tools = await listToolkitTools(toolkitSlug, 30, fetchImpl);
+  const definition = tools.find((tool) => tool.slug === cleanSlug);
+  if (!definition) return deny('Composio tool was not discovered');
+  if (!validArguments(definition.inputParameters, args)) return deny('Invalid Composio tool arguments');
+  if (!activeTargets().some((target) => target.toolkitSlug === toolkitSlug && target.accountId === accountId)) {
+    return deny('Composio account changed before execution');
   }
 
-  const toolkitSlug = cleanSlug.split('_')[0]?.toLowerCase() ?? 'composio';
-  const userId = getComposioUserId();
-  const db = getDb();
-  const logId = `clg_${crypto.randomUUID().slice(0, 8)}`;
-
+  let outcome: ComposioResult['outcome'] = 'unknown';
+  let summary = 'Composio execution outcome is unknown';
+  let data: unknown;
+  let ok = false;
   try {
     const res = await fetchImpl(`${COMPOSIO_API_V3}/tools/execute/${encodeURIComponent(cleanSlug)}`, {
       method: 'POST',
       headers: getComposioHeaders(apiKey),
       body: JSON.stringify({
-        user_id: userId,
+        user_id: getComposioUserId(),
+        connected_account_id: accountId,
         arguments: args,
         version: 'latest',
       }),
       signal: AbortSignal.timeout(15000),
     });
-
-    const json = await res.json().catch(() => ({}));
-    const summary = summarizeToolResult(json);
-
-    if (!res.ok) {
-      db.prepare(
-        `INSERT INTO composio_tool_logs (id, tool_slug, toolkit_slug, arguments_json, status, result_summary)
-         VALUES (?, ?, ?, ?, 'failed', ?)`,
-      ).run(logId, cleanSlug, toolkitSlug, JSON.stringify(args), summary);
-      sseBus.emit('composio:update', { toolSlug: cleanSlug, status: 'failed' });
-      return { ok: false, data: json, summary, error: `HTTP ${res.status}` };
+    const result: unknown = await res.json().catch(() => null);
+    const successful = result && typeof result === 'object' && 'successful' in result ? result.successful : undefined;
+    if (res.ok && successful === true) {
+      ok = true;
+      summary = 'Composio confirmed success';
+      data = result;
+      outcome = undefined;
+    } else if (successful === false || (res.status >= 400 && res.status < 500 && res.status !== 408)) {
+      outcome = 'failed';
+      summary = `Composio rejected the action (HTTP ${res.status})`;
     }
-
-    db.prepare(
-      `INSERT INTO composio_tool_logs (id, tool_slug, toolkit_slug, arguments_json, status, result_summary)
-       VALUES (?, ?, ?, ?, 'success', ?)`,
-    ).run(logId, cleanSlug, toolkitSlug, JSON.stringify(args), summary);
-    sseBus.emit('composio:update', { toolSlug: cleanSlug, status: 'success' });
-    return { ok: true, data: json, summary };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : 'Composio execution error';
-    db.prepare(
-      `INSERT INTO composio_tool_logs (id, tool_slug, toolkit_slug, arguments_json, status, result_summary)
-       VALUES (?, ?, ?, ?, 'failed', ?)`,
-    ).run(logId, cleanSlug, toolkitSlug, JSON.stringify(args), errMsg);
-    return { ok: false, summary: errMsg, error: errMsg };
+  } catch {
+    // A timeout or lost response does not establish whether the provider executed the action.
   }
+
+  const status = ok ? 'success' : 'failed';
+  getDb().prepare(
+    `INSERT INTO composio_tool_logs (id, tool_slug, toolkit_slug, arguments_json, status, result_summary)
+     VALUES (?, ?, ?, '{}', ?, ?)`,
+  ).run(`clg_${crypto.randomUUID()}`, cleanSlug, toolkitSlug, status, summary);
+  sseBus.emit('composio:update', { toolSlug: cleanSlug, status });
+  return ok ? { ok, data, summary } : { ok, outcome, summary, error: summary };
+}
+
+export function executeComposioTool(
+  toolSlug: string,
+  args: unknown,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<ComposioResult> {
+  return executeAuthorizedTool(toolSlug, args, fetchImpl);
+}
+
+export async function executeApprovedComposioTool(
+  auditId: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<ComposioResult | null> {
+  const db = getDb();
+  // Use a non-success state until the provider confirms success. A crash leaves the claim consumed.
+  const audit = db.prepare(
+    `UPDATE agent_audit_logs SET status = 'failed', undo_payload_json = ?
+     WHERE id = ? AND tool_name = 'composio_execute_tool' AND status = 'pending_approval'
+     RETURNING tool_args_json, created_at >= datetime('now', ?) AS valid_window
+     `,
+  ).get(JSON.stringify({ kind: 'none', outcome: 'unknown' }), auditId, `-${APPROVAL_WINDOW_MINUTES} minutes`) as
+    { tool_args_json: string; valid_window: number } | undefined;
+  if (!audit) return null;
+  if (!audit.valid_window) return deny('Composio approval expired');
+
+  const request = JSON.parse(audit.tool_args_json) as {
+    toolSlug: string;
+    arguments: unknown;
+    target?: ComposioTarget;
+  };
+  if (!request.target?.toolkitSlug || !request.target.accountId) {
+    return deny('Composio approval requires a bound account. Create a new approval.');
+  }
+  return executeAuthorizedTool(request.toolSlug, request.arguments, fetchImpl, request.target);
 }

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDb, initDatabase } from './db/connection.ts';
+import { createBrowserSessions } from './lib/browser-session.ts';
 import { HttpBadRequestError, readJsonBody, sendError, sendJson } from './lib/http.ts';
 import { sseBus } from './lib/sse.ts';
 import {
@@ -181,7 +182,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   if (method === 'GET' && pathname === '/api/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-store',
       Connection: 'keep-alive',
     });
     const unsubscribe = sseBus.subscribe(res);
@@ -502,13 +503,17 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   if (method === 'POST' && /^\/api\/scheduler\/messages\/[^/]+\/approve$/.test(pathname)) {
     const msgId = pathname.split('/')[4];
     const body = await readJsonBody<{ messageBody?: string; scheduledAt?: string; channel?: OutboundChannel }>(req);
-    sendJson(res, 200, approveScheduledMessage(msgId, body));
+    const approved = approveScheduledMessage(msgId, body);
+    if (!approved) sendError(res, 409, 'Scheduled message approval was rejected');
+    else sendJson(res, 200, approved);
     return true;
   }
   if (method === 'PATCH' && /^\/api\/scheduler\/messages\/[^/]+\/status$/.test(pathname)) {
     const msgId = pathname.split('/')[4];
     const body = await readJsonBody<{ status: 'sent_manual_confirmed' | 'cancelled' | 'pending_approval' }>(req);
-    sendJson(res, 200, updateScheduledMessageStatus(msgId, body.status));
+    const updated = updateScheduledMessageStatus(msgId, body?.status);
+    if (!updated) sendError(res, 409, 'Scheduled message status change was rejected');
+    else sendJson(res, 200, updated);
     return true;
   }
   if (method === 'GET' && pathname === '/api/scheduler/contacts') {
@@ -582,7 +587,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   }
   if (method === 'POST' && pathname === '/api/composio/tools/execute') {
     const body = await readJsonBody<{ toolSlug: string; arguments?: Record<string, unknown> }>(req);
-    const out = await executeComposioTool(body.toolSlug, body.arguments ?? {});
+    const out = await executeComposioTool(body?.toolSlug, body?.arguments === undefined ? {} : body.arguments);
     if (!out.ok) sendError(res, 400, out.error ?? out.summary);
     else sendJson(res, 200, out);
     return true;
@@ -624,7 +629,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   if (method === 'POST' && /^\/api\/agent\/audit\/[^/]+\/approve$/.test(pathname)) {
     const auditId = pathname.split('/')[4];
     const body = await readJsonBody<{ editedArgs?: Record<string, unknown> }>(req);
-    const resAudit = await approveAuditAction(auditId, body.editedArgs);
+    const resAudit = await approveAuditAction(auditId, body?.editedArgs);
     if (!resAudit) sendError(res, 404, 'Pending audit not found');
     else sendJson(res, 200, resAudit);
     return true;
@@ -929,26 +934,27 @@ function getOrCreateNodeApiToken(): string {
 }
 
 function isLoopbackAddress(addr: string | undefined): boolean {
-  if (!addr) return false;
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function hasLocalRequestHeaders(req: IncomingMessage): boolean {
+  const hosts = req.headersDistinct.host;
+  if (hosts?.length !== 1 || !/^(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(hosts[0])) {
+    return false;
+  }
+  return !Object.keys(req.headers).some((header) =>
+    header === 'forwarded' || header === 'via' || header === 'x-real-ip' ||
+    header.startsWith('x-forwarded-') || header.startsWith('tailscale-'),
+  );
 }
 
 function isOriginAllowed(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
   if (!origin) return true;
   try {
-    const originHost = new URL(origin).host;
-    const reqHost = req.headers.host ?? '';
-    if (originHost === reqHost) return true;
-    const originHostname = new URL(origin).hostname;
-    if ((originHostname === '127.0.0.1' || originHostname === 'localhost') && reqHost.startsWith(originHostname)) {
-      return true;
-    }
-    // Allow Vite dev proxy origin (localhost:5173 / 127.0.0.1:5173) targeting loopback
-    if ((originHostname === '127.0.0.1' || originHostname === 'localhost') && isLoopbackAddress(req.socket.remoteAddress)) {
-      return true;
-    }
-    return false;
+    const url = new URL(origin);
+    return (url.protocol === 'http:' || url.protocol === 'https:') &&
+      origin === url.origin && url.host === req.headers.host?.toLowerCase();
   } catch {
     return false;
   }
@@ -958,16 +964,18 @@ export function isRemoteRequestAuthorized(
   remoteAddress: string | undefined,
   authHeader: string | undefined,
   apiToken: string,
+  allowLocalShortcut = false,
 ): boolean {
-  if (isLoopbackAddress(remoteAddress)) return true;
+  if (allowLocalShortcut && isLoopbackAddress(remoteAddress)) return true;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
-  const presented = authHeader.slice(7);
-  if (presented.length !== apiToken.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(apiToken));
+  const presented = Buffer.from(authHeader.slice(7));
+  const expected = Buffer.from(apiToken);
+  return expected.length > 0 && presented.length === expected.length && crypto.timingSafeEqual(presented, expected);
 }
 
 export function createLlamreiServer(): http.Server {
   const apiToken = getOrCreateNodeApiToken();
+  const browserSessions = createBrowserSessions(process.env.LLAMREI_REMOTE_ORIGIN, isLoopbackAddress);
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -980,10 +988,24 @@ export function createLlamreiServer(): http.Server {
           sendError(res, 403, 'Forbidden cross-origin API request');
           return;
         }
-        // 2. Non-loopback requests require Bearer token (tailscale serve proxies via 127.0.0.1 loopback)
-        if (!isRemoteRequestAuthorized(req.socket.remoteAddress, req.headers.authorization, apiToken)) {
-          sendError(res, 401, 'Unauthorized: Bearer token required for non-loopback access');
+        // Reverse proxies can reach this listener over loopback. Forwarded traffic needs credentials.
+        const directLocal = isLoopbackAddress(req.socket.remoteAddress) && hasLocalRequestHeaders(req);
+        const hasBearer = isRemoteRequestAuthorized(req.socket.remoteAddress, req.headers.authorization, apiToken);
+        if (pathname === '/api/auth/session') {
+          browserSessions.handle(req, res, directLocal, hasBearer);
           return;
+        }
+        if (!directLocal && !hasBearer) {
+          const session = browserSessions.get(req);
+          if (!session) {
+            sendError(res, 401, 'Unauthorized: API token or browser session required');
+            return;
+          }
+          if (req.method !== 'GET' && req.method !== 'HEAD' && !browserSessions.isSameOrigin(req)) {
+            sendError(res, 403, 'Browser session writes require the configured origin');
+            return;
+          }
+          if (pathname === '/api/events' && req.method === 'GET') browserSessions.trackStream(session, res);
         }
 
         const handled = await routeApi(req, res, pathname);

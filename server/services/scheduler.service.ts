@@ -137,26 +137,28 @@ export function approveScheduledMessage(
   msgId: string,
   edits?: { messageBody?: string; scheduledAt?: string; channel?: OutboundChannel },
 ): (ScheduledMessageRow & { waMeUrl: string }) | null {
-  const db = getDb();
-  const prev = db.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(msgId) as unknown as ScheduledMessageRow | undefined;
-  if (!prev) return null;
+  if (edits?.messageBody !== undefined && (typeof edits.messageBody !== 'string' || !edits.messageBody.trim())) return null;
+  if (edits?.scheduledAt !== undefined && (typeof edits.scheduledAt !== 'string' || !Number.isFinite(Date.parse(edits.scheduledAt)))) return null;
+  if (edits?.channel !== undefined && !['wa_gateway', 'nectarlink_bridge', 'wa_me_manual', 'telegram', 'email'].includes(edits.channel)) return null;
 
-  db.prepare(
+  const db = getDb();
+  const row = db.prepare(
     `UPDATE scheduled_messages
      SET status = 'approved',
          approved_at = datetime('now'),
-         message_body = ?,
-         scheduled_at = ?,
-         channel = ?
-     WHERE id = ?`,
-  ).run(
-    edits?.messageBody ?? prev.message_body,
-    edits?.scheduledAt ?? prev.scheduled_at,
-    edits?.channel ?? prev.channel,
+         message_body = COALESCE(?, message_body),
+         scheduled_at = COALESCE(?, scheduled_at),
+         channel = COALESCE(?, channel)
+     WHERE id = ? AND status = 'pending_approval'
+     RETURNING *`,
+  ).get(
+    edits?.messageBody ?? null,
+    edits?.scheduledAt ?? null,
+    edits?.channel ?? null,
     msgId,
-  );
+  ) as unknown as ScheduledMessageRow | undefined;
 
-  const row = db.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(msgId) as unknown as ScheduledMessageRow;
+  if (!row) return null;
   const enriched = { ...row, waMeUrl: buildWaMeUrl(row.recipient_address, row.message_body) };
   sseBus.emit('chat:update', enriched);
   return enriched;
@@ -167,57 +169,113 @@ export function updateScheduledMessageStatus(
   status: 'sent_manual_confirmed' | 'cancelled' | 'pending_approval',
 ): (ScheduledMessageRow & { waMeUrl: string }) | null {
   const db = getDb();
-  db.prepare(
+  const allowedTransitions = {
+    pending_approval: ['approved'],
+    cancelled: ['pending_approval', 'approved', 'reminded_fallback'],
+    sent_manual_confirmed: ['pending_approval', 'approved', 'reminded_fallback', 'failed'],
+  };
+  if (!Object.hasOwn(allowedTransitions, status)) return null;
+  const row = db.prepare(
     `UPDATE scheduled_messages
      SET status = ?,
+         approved_at = CASE WHEN ? = 'pending_approval' THEN NULL ELSE approved_at END,
          sent_at = CASE WHEN ? = 'sent_manual_confirmed' THEN datetime('now') ELSE sent_at END
-     WHERE id = ?`,
-  ).run(status, status, msgId);
-  const row = db.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(msgId) as unknown as ScheduledMessageRow | undefined;
+     WHERE id = ? AND status IN (SELECT value FROM json_each(?))
+     RETURNING *`,
+  ).get(status, status, status, msgId, JSON.stringify(allowedTransitions[status])) as unknown as ScheduledMessageRow | undefined;
   if (!row) return null;
   const enriched = { ...row, waMeUrl: buildWaMeUrl(row.recipient_address, row.message_body) };
   sseBus.emit('chat:update', enriched);
   return enriched;
 }
 
+const activeDispatchTicks = new WeakSet<ReturnType<typeof getDb>>();
+const STALE_DISPATCH_MS = 60_000;
+
 /**
- * Only executes messages explicitly marked `approved` whose `scheduled_at <= now`.
- * Messages in `pending_approval` are strictly skipped by the approval gate.
+ * A conditional claim is committed before dispatch. After interruption the result
+ * is unknown, so an expired claim is retained as a failed attempt without retrying.
  */
 export async function processDueScheduledMessagesTick(now = new Date()): Promise<ScheduledMessageRow[]> {
   const db = getDb();
-  const nowMs = now.getTime();
-  const approved = db
-    .prepare("SELECT * FROM scheduled_messages WHERE status = 'approved'")
-    .all() as unknown as ScheduledMessageRow[];
+  if (activeDispatchTicks.has(db)) return [];
+  activeDispatchTicks.add(db);
 
-  const processed: ScheduledMessageRow[] = [];
-  for (const msg of approved) {
-    const schedMs = Date.parse(msg.scheduled_at);
-    if (Number.isNaN(schedMs) || schedMs > nowMs) continue;
+  try {
+    const cutoff = new Date(Date.now() - STALE_DISPATCH_MS).toISOString();
+    const interrupted = db.prepare(
+      `UPDATE scheduled_messages
+       SET status = 'failed', sent_at = NULL,
+           gateway_response_json = json_object(
+             'outcome', 'unknown', 'reason', 'interrupted_dispatch',
+             'attemptId', CASE WHEN json_valid(gateway_response_json) THEN json_extract(gateway_response_json, '$.attemptId') END,
+             'claimedAt', CASE WHEN json_valid(gateway_response_json) THEN json_extract(gateway_response_json, '$.claimedAt') END
+           )
+       WHERE status = 'sending' AND CASE
+         WHEN json_valid(gateway_response_json) THEN
+           COALESCE(julianday(json_extract(gateway_response_json, '$.claimedAt')) > julianday(?), 0) = 0
+         ELSE 1 END
+       RETURNING *`,
+    ).all(cutoff) as unknown as ScheduledMessageRow[];
+    for (const msg of interrupted) sseBus.emit('chat:update', msg);
 
-    db.prepare("UPDATE scheduled_messages SET status = 'sending' WHERE id = ?").run(msg.id);
-    const dispatch = await dispatchApprovedMessage({
-      recipientName: msg.recipient_name,
-      recipientAddress: msg.recipient_address,
-      channel: msg.channel,
-      messageBody: msg.message_body,
-    });
-
-    db.prepare(
+    const approved = db.prepare(
+      "SELECT id, scheduled_at FROM scheduled_messages WHERE status = 'approved' AND approved_at IS NOT NULL ORDER BY scheduled_at",
+    ).all() as Array<{ id: string; scheduled_at: string }>;
+    const claim = db.prepare(
+      `UPDATE scheduled_messages SET status = 'sending', sent_at = NULL, gateway_response_json = ?
+       WHERE id = ? AND status = 'approved' AND approved_at IS NOT NULL AND scheduled_at = ?
+       RETURNING *`,
+    );
+    const complete = db.prepare(
       `UPDATE scheduled_messages
        SET status = ?,
            sent_at = CASE WHEN ? = 'sent_auto' THEN datetime('now') ELSE NULL END,
            gateway_response_json = ?
-       WHERE id = ?`,
-    ).run(dispatch.finalStatus, dispatch.finalStatus, JSON.stringify(dispatch.detail), msg.id);
+       WHERE id = ? AND status = 'sending' AND gateway_response_json = ?
+       RETURNING *`,
+    );
 
-    const updated = db.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(msg.id) as unknown as ScheduledMessageRow;
-    processed.push(updated);
-    sseBus.emit('chat:dispatched', { ...updated, waMeUrl: dispatch.waMeUrl });
+    const nowMs = now.getTime();
+    const processed: ScheduledMessageRow[] = [];
+    for (const candidate of approved) {
+      if (!(Date.parse(candidate.scheduled_at) <= nowMs)) continue;
+      const attempt = { attemptId: crypto.randomUUID(), claimedAt: new Date().toISOString() };
+      const claimJson = JSON.stringify(attempt);
+      const msg = claim.get(claimJson, candidate.id, candidate.scheduled_at) as unknown as ScheduledMessageRow | undefined;
+      if (!msg) continue;
+      sseBus.emit('chat:update', msg);
+
+      let status: ScheduledMessageRow['status'];
+      let detail: Record<string, unknown>;
+      let waMeUrl: string | undefined;
+      try {
+        const dispatch = await dispatchApprovedMessage({
+          recipientName: msg.recipient_name,
+          recipientAddress: msg.recipient_address,
+          channel: msg.channel,
+          messageBody: msg.message_body,
+          attemptId: attempt.attemptId,
+        });
+        status = dispatch.finalStatus;
+        detail = dispatch.detail;
+        if (status === 'reminded_fallback') waMeUrl = dispatch.waMeUrl;
+      } catch {
+        status = 'failed';
+        detail = { outcome: 'unknown', reason: 'dispatch_error' };
+      }
+
+      const result = JSON.stringify({ ...detail, ...attempt });
+      const updated = complete.get(status, status, result, msg.id, claimJson) as unknown as ScheduledMessageRow | undefined;
+      if (!updated) continue;
+      processed.push(updated);
+      if (status === 'failed') sseBus.emit('chat:update', updated);
+      else sseBus.emit('chat:dispatched', { ...updated, waMeUrl });
+    }
+    return processed;
+  } finally {
+    activeDispatchTicks.delete(db);
   }
-
-  return processed;
 }
 
 let schedulerInterval: NodeJS.Timeout | null = null;
@@ -225,12 +283,14 @@ let tickCounter = 0;
 
 export function startBackgroundDaemons(): void {
   if (schedulerInterval) return;
+  tickCounter = 0;
+  const processScheduledMessages = () => {
+    void processDueScheduledMessagesTick().catch(() => console.error('[scheduler] Scheduled message tick failed'));
+  };
   schedulerInterval = setInterval(() => {
     tickCounter++;
-    void processDueAlarmsTick();
-    if (tickCounter % 15 === 0) {
-      void processDueScheduledMessagesTick();
-    }
+    void processDueAlarmsTick().catch(() => console.error('[scheduler] Alarm tick failed'));
+    if (tickCounter === 1 || tickCounter % 15 === 0) processScheduledMessages();
   }, 1000);
 }
 

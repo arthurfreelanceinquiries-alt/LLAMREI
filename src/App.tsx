@@ -12,7 +12,7 @@ import { WaTagInboxView } from './components/messaging/WaTagInboxView';
 import { CommandPaletteModal } from './components/modals/CommandPaletteModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { MorningBentoView } from './components/morning/MorningBentoView';
-import { PhoneHubView } from './components/phonehub/PhoneHubView';
+import { PhoneHubView, type PhoneCommandFeedback } from './components/phonehub/PhoneHubView';
 import { TradingJournalView } from './components/trader/TradingJournalView';
 import { IntegrationsHubView } from './components/integrations/IntegrationsHubView';
 import { FocusedChatModal } from './components/watags/FocusedChatModal';
@@ -425,43 +425,40 @@ function DashboardShell() {
                 await loadBootstrap();
               }}
               onRingPhone={async () => {
-                await apiRequest('/api/phonehub/ring', { method: 'POST', body: {} });
-              }}
-              onMirrorScreen={async (deviceId) => {
-                const res = await apiRequest<{ note: string }>('/api/phonehub/mirror', { method: 'POST', body: { deviceId } });
+                const result = await apiRequest<PhoneCommandFeedback>('/api/phonehub/ring', { method: 'POST', body: {} });
                 await loadBootstrap();
-                return res;
+                return result;
               }}
+              onMirrorScreen={(deviceId) => apiRequest<PhoneCommandFeedback>('/api/phonehub/mirror', {
+                method: 'POST', body: { deviceId },
+              })}
               onSendFileOrLink={async (payload) => {
-                await apiRequest('/api/phonehub/send', { method: 'POST', body: payload });
+                const result = await apiRequest<PhoneCommandFeedback>('/api/phonehub/send', { method: 'POST', body: payload });
                 await loadBootstrap();
+                return result;
               }}
               onSendClipboard={async (text) => {
-                await apiRequest('/api/phonehub/clipboard', { method: 'POST', body: { text } });
+                const result = await apiRequest<PhoneCommandFeedback>('/api/phonehub/clipboard', { method: 'POST', body: { text } });
                 await loadBootstrap();
+                return result;
               }}
-              onCameraCapture={async (mode) => {
-                const res = await apiRequest<{ artifactLabel: string }>('/api/phonehub/camera', {
-                  method: 'POST',
-                  body: { mode },
-                });
-                await loadBootstrap();
-                return res;
-              }}
+              onCameraCapture={(mode) => apiRequest<PhoneCommandFeedback>('/api/phonehub/camera', {
+                method: 'POST', body: { mode },
+              })}
               onToggleControl={async (deviceId, toggle, enabled) => {
-                await apiRequest(`/api/phonehub/devices/${deviceId}/toggle`, {
+                const result = await apiRequest<PhoneCommandFeedback>(`/api/phonehub/devices/${deviceId}/toggle`, {
                   method: 'PATCH',
                   body: { toggle, enabled },
                 });
                 await loadBootstrap();
+                return result;
               }}
-              onReplyNotification={async (notifId, replyText) => {
-                await apiRequest(`/api/phonehub/notifications/${notifId}/reply`, {
+              onReplyNotification={(notifId, replyText) =>
+                apiRequest<PhoneCommandFeedback>(`/api/phonehub/notifications/${notifId}/reply`, {
                   method: 'POST',
                   body: { replyText },
-                });
-                await loadBootstrap();
-              }}
+                })
+              }
               onDismissNotification={async (notifId) => {
                 await apiRequest(`/api/phonehub/notifications/${notifId}`, { method: 'DELETE' });
                 await loadBootstrap();
@@ -489,7 +486,7 @@ function DashboardShell() {
                 await loadBootstrap();
               }}
               onConnectTailscalePeer={async (deviceId, tailscaleIp) => {
-                const res = await apiRequest<{ message: string }>('/api/phonehub/tailscale-connect', {
+                const res = await apiRequest<PhoneCommandFeedback>('/api/phonehub/tailscale-connect', {
                   method: 'POST',
                   body: { deviceId, tailscaleIp },
                 });

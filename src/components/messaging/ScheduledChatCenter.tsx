@@ -126,6 +126,8 @@ export function ScheduledChatCenter({
             {messages.map((m) => {
               const isPending = m.status === 'pending_approval';
               const isApproved = m.status === 'approved';
+              const isFallbackReady = m.status === 'reminded_fallback';
+              const hasUnconfirmedOutcome = m.status === 'failed';
               return (
                 <div key={m.id} className="themed-card p-3 space-y-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -145,13 +147,18 @@ export function ScheduledChatCenter({
                             : { background: 'var(--bg-elevated)', color: 'var(--text-secondary)', borderColor: 'var(--border-subtle)' }
                       }
                     >
-                      {m.status.toUpperCase()}
+                      {hasUnconfirmedOutcome ? 'PENGIRIMAN BELUM TERKONFIRMASI' : m.status.toUpperCase()}
                     </span>
                   </div>
 
                   <div className="bg-black/25 p-2 rounded italic" style={{ color: 'var(--text-secondary)' }}>
                     "{m.message_body}"
                   </div>
+                  {hasUnconfirmedOutcome && (
+                    <p style={{ color: 'var(--text-secondary)' }}>
+                      Periksa kanal pengiriman sebelum mengirim ulang atau menandai pesan sebagai terkirim.
+                    </p>
+                  )}
 
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
@@ -167,16 +174,18 @@ export function ScheduledChatCenter({
                           ✓ Approve & Jadwalkan
                         </button>
                       )}
-                      <a
-                        href={m.waMeUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="px-2.5 py-1 rounded font-mono-num border"
-                        style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)', color: 'var(--accent-2)' }}
-                      >
-                        Fallback wa.me ↗
-                      </a>
-                      {m.status !== 'cancelled' && m.status !== 'sent_manual_confirmed' && (
+                      {(isPending || isFallbackReady) && (
+                        <a
+                          href={m.waMeUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-2.5 py-1 rounded font-mono-num border"
+                          style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)', color: 'var(--accent-2)' }}
+                        >
+                          Fallback wa.me ↗
+                        </a>
+                      )}
+                      {(isPending || isApproved || isFallbackReady || hasUnconfirmedOutcome) && (
                         <button
                           onClick={() => void onUpdateMessageStatus(m.id, 'sent_manual_confirmed')}
                           className="px-2 py-1 rounded font-mono-num border cursor-pointer"

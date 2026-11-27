@@ -17,6 +17,8 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "pino": "^10.4.0",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",

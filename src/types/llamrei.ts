@@ -327,7 +327,9 @@ export interface ApprovalCard {
   toolName: string;
   title: string;
   summary: string;
-  status: 'pending_approval' | 'approved_executed' | 'rejected' | 'undone';
+  status: 'pending_approval' | 'approved_executed' | 'rejected' | 'undone' | 'failed';
+  executionNote?: string;
+  executionOutcome?: 'denied' | 'failed' | 'unknown';
   args: Record<string, unknown>;
   scheduledMessageId?: string;
   waMeUrl?: string;
@@ -347,6 +349,7 @@ export interface AuditLogItem {
   user_command: string;
   tool_name: string;
   status: string;
+  undo_payload_json?: string | null;
   created_at: string;
 }
 
@@ -532,6 +535,8 @@ export interface BootstrapPayload {
     remainingUsd: number;
     blocked: boolean;
     callsCount: number;
+    actualSpentUsd: number;
+    estimatedSpentUsd: number;
   };
   aiProviders: AiProviderCatalogSummary;
   composio: ComposioState;

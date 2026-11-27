@@ -115,6 +115,12 @@ Aset dan dokumen kepatuhan Play Store telah disiapkan di folder `docs/`:
 - **Persetujuan Mutlak Pesan Keluar (*Approve-Then-Send*):** Agen AI dilarang mengirim pesan tanpa konfirmasi eksplisit pengguna via kartu persetujuan (*Approval Card*).
 - **Proteksi Injeksi Formula:** Mesin impor/ekspor CSV memfilter seluruh karakter berbahaya (`=`, `+`, `-`, `@`).
 
+### Akses browser melalui Tailscale Serve
+
+Build dashboard dengan `npm run build`. Tetapkan `LLAMREI_REMOTE_ORIGIN` ke origin HTTPS persis yang ditampilkan oleh Tailscale Serve, misalnya `https://llamrei.example-tailnet.ts.net`, lalu jalankan `npm start` dengan API tetap terikat ke `127.0.0.1`. Arahkan Tailscale Serve privat ke port API, default `4321`. Proxy lokal harus meneruskan host asal serta header `X-Forwarded-Host` dan `X-Forwarded-Proto: https` dari koneksi TLS.
+
+Buka alamat HTTPS di browser dan masuk dengan token API yang sudah dikonfigurasi melalui `LLAMREI_API_TOKEN` atau file `.api.token` di direktori vault. Sesi berlaku satu jam dan bisa diakhiri dengan tombol **Keluar dari sesi jarak jauh**. Aplikasi Android dan klien API tetap memakai header `Authorization: Bearer`. Dashboard di localhost tetap dapat dibuka langsung.
+
 ---
 
 ## 📄 Lisensi

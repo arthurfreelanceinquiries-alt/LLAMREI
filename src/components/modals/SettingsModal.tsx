@@ -16,7 +16,7 @@ interface Props {
 const SECRET_FIELDS = [
   { key: 'OPENCODE_API_KEY', label: 'OpenCode Zen API Key (Model Gratis OpenCode)', placeholder: 'sk-...' },
   { key: 'OPENROUTER_API_KEY', label: 'OpenRouter API Key (Model :free Pool)', placeholder: 'sk-or-v1-...' },
-  { key: 'GROQ_API_KEY', label: 'Groq API Key (LPU Cepat Gratis)', placeholder: 'gsk_...' },
+  { key: 'GROQ_API_KEY', label: 'Groq API Key', placeholder: 'gsk_...' },
   { key: 'COMPOSIO_API_KEY', label: 'Composio API Key (150+ App Integrations)', placeholder: 'ak_...' },
   { key: 'GEMINI_API_KEY', label: 'Google Gemini API Key (AI Studio)', placeholder: 'AIza...' },
   { key: 'NOTION_TOKEN', label: 'Notion Integration Token (Kalender)', placeholder: 'secret_...' },
@@ -53,8 +53,9 @@ export function SettingsModal({
   const [allowCliFallback, setAllowCliFallback] = useState(Boolean(settings.allow_opencode_cli_fallback));
   const [budgetCap, setBudgetCap] = useState(String(settings.ai_monthly_budget_usd ?? 10));
   const [notionDbId, setNotionDbId] = useState(String(settings.notion_database_id ?? ''));
-  const [composioUserId, setComposioUserId] = useState(String(settings.composio_user_id ?? 'arthur_reezan'));
-  const [paidBilling, setPaidBilling] = useState(Boolean(settings.paid_billing_verified));
+  const [composioUserId, setComposioUserId] = useState(String(settings.composio_user_id ?? 'llamrei_local'));
+  const [paidBilling, setPaidBilling] = useState(settings.paid_billing_verified === true);
+  const [allowCloudChatContext, setAllowCloudChatContext] = useState(settings.ai_allow_cloud_chat_context === true);
   const [secretInputs, setSecretInputs] = useState<Record<string, string>>({});
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
@@ -67,6 +68,11 @@ export function SettingsModal({
   const ollamaModels = aiProviders?.providers.find((p) => p.id === 'ollama')?.models ?? [];
 
   const handleSaveAll = async () => {
+    const monthlyBudget = budgetCap.trim() ? Number(budgetCap) : NaN;
+    if (!Number.isFinite(monthlyBudget) || monthlyBudget < 0) {
+      setStatusMsg('Masukkan anggaran bulanan minimal $0.');
+      return;
+    }
     await onSaveSettings({
       theme,
       assistant_persona: persona,
@@ -78,10 +84,11 @@ export function SettingsModal({
       ollama_model: ollamaModel.trim() || 'qwen2.5:7b',
       ai_model: aiModel,
       allow_opencode_cli_fallback: allowCliFallback,
-      ai_monthly_budget_usd: Number(budgetCap) || 10,
+      ai_monthly_budget_usd: monthlyBudget,
       notion_database_id: notionDbId.trim(),
-      composio_user_id: composioUserId.trim() || 'arthur_reezan',
+      composio_user_id: composioUserId.trim() || 'llamrei_local',
       paid_billing_verified: paidBilling,
+      ai_allow_cloud_chat_context: allowCloudChatContext,
     });
     for (const [k, v] of Object.entries(secretInputs)) {
       if (v.trim()) {
@@ -174,21 +181,21 @@ export function SettingsModal({
                 className="w-full px-2.5 py-1.5 rounded border"
                 style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
               >
-                <option value="auto">⚡ Auto-Fallback Gratis (OpenCode → OpenRouter → Groq → Ollama → Gemini)</option>
-                <option value="opencode_zen">🟢 OpenCode Zen (Free Models API)</option>
-                <option value="opencode_cli">💻 OpenCode CLI Lokal ({aiProviders?.opencodeCliAvailable ? 'Terdeteksi' : 'Belum di PATH'})</option>
-                <option value="openrouter">🌐 OpenRouter (:free Models)</option>
-                <option value="groq">⚡ Groq LPU (Free Fast Tier)</option>
-                <option value="ollama">🏠 Ollama Lokal (Offline 100% Gratis)</option>
-                <option value="gemini">✨ Google Gemini (AI Studio)</option>
-                <option value="local">🛡️ Offline Deterministic Router (Tanpa LLM)</option>
+                <option value="auto">Otomatis (OpenCode, OpenRouter, Ollama lokal)</option>
+                <option value="opencode_zen">OpenCode Zen (harga dicek)</option>
+                <option value="opencode_cli">OpenCode CLI (harga belum terverifikasi)</option>
+                <option value="openrouter">OpenRouter :free (harga dicek)</option>
+                <option value="groq">Groq (harga belum terverifikasi)</option>
+                <option value="ollama">Ollama lokal</option>
+                <option value="gemini">Gemini (harga belum terverifikasi)</option>
+                <option value="local">Mode offline (tanpa LLM)</option>
               </select>
             </label>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="space-y-1 block">
-              <span className="font-semibold">Model OpenCode Free</span>
+              <span className="font-semibold">Model OpenCode</span>
               <select
                 value={opencodeModel}
                 onChange={(e) => setOpencodeModel(e.target.value)}
@@ -234,7 +241,7 @@ export function SettingsModal({
             </label>
 
             <label className="space-y-1 block">
-              <span className="font-semibold">Model Groq Free</span>
+              <span className="font-semibold">Model Groq</span>
               <select
                 value={groqModel}
                 onChange={(e) => setGroqModel(e.target.value)}
@@ -283,7 +290,7 @@ export function SettingsModal({
             </label>
 
             <label className="space-y-1 block">
-              <span className="font-semibold">Model Gemini (Cadangan / Berbayar)</span>
+              <span className="font-semibold">Model Gemini</span>
               <select
                 value={aiModel}
                 onChange={(e) => setAiModel(e.target.value)}
@@ -296,10 +303,11 @@ export function SettingsModal({
             </label>
 
             <label className="space-y-1 block">
-              <span className="font-semibold">Hard Cap Anggaran AI Berbayar (USD)</span>
+              <span className="font-semibold">Anggaran AI Bulanan (USD)</span>
               <input
                 type="number"
-                step="1"
+                min="0"
+                step="0.01"
                 value={budgetCap}
                 onChange={(e) => setBudgetCap(e.target.value)}
                 className="w-full px-2.5 py-1.5 rounded border"
@@ -312,7 +320,7 @@ export function SettingsModal({
               <input
                 value={composioUserId}
                 onChange={(e) => setComposioUserId(e.target.value)}
-                placeholder="arthur_reezan"
+                placeholder="llamrei_local"
                 className="w-full px-2.5 py-1.5 rounded border"
                 style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
               />
@@ -321,12 +329,17 @@ export function SettingsModal({
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={allowCliFallback} onChange={(e) => setAllowCliFallback(e.target.checked)} />
-            <span>Izinkan fallback ke OpenCode CLI lokal saat mode Auto jika API key belum diisi</span>
+            <span>Izinkan fallback OpenCode CLI setelah harga terverifikasi</span>
           </label>
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={paidBilling} onChange={(e) => setPaidBilling(e.target.checked)} />
-            <span>Izinkan kirim potongan konteks chat WA ke provider cloud (non-lokal)</span>
+            <span>Saya telah memeriksa pengaturan tagihan provider AI. Saat ini Llamrei hanya memproses permintaan dengan biaya nol yang terverifikasi.</span>
+          </label>
+
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" checked={allowCloudChatContext} onChange={(e) => setAllowCloudChatContext(e.target.checked)} />
+            <span>Izinkan provider cloud memproses percakapan, riwayat, lampiran, dan hasil alat. Llamrei menyamarkan nomor telepon, email, dan kode verifikasi yang terdeteksi.</span>
           </label>
         </div>
 
