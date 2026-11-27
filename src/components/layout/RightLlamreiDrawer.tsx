@@ -1,26 +1,42 @@
 import { useEffect, useRef, useState } from 'react';
 import { isVoiceRecognitionSupported, speakLlamreiReply, startVoiceDictation } from '../../lib/voice';
-import type { ApprovalCard, AuditLogItem, ChatMessageItem } from '../../types/llamrei';
+import type {
+  AiProviderCatalogSummary,
+  AiProviderId,
+  ApprovalCard,
+  AuditLogItem,
+  ChatMessageItem,
+} from '../../types/llamrei';
 
 interface Props {
   messages: ChatMessageItem[];
   auditLogs: AuditLogItem[];
+  aiProviders?: AiProviderCatalogSummary;
+  connectedAppsCount?: number;
   pendingContext: Record<string, unknown> | null;
   onClearContext: () => void;
-  onSendPrompt: (prompt: string, context?: Record<string, unknown> | null) => Promise<void>;
+  onSendPrompt: (
+    prompt: string,
+    context?: Record<string, unknown> | null,
+    aiOverride?: { providerOverride?: AiProviderId; modelOverride?: string },
+  ) => Promise<void>;
   onApproveAudit: (auditId: string) => Promise<void>;
   onUndoAudit: (auditId: string) => Promise<void>;
+  onOpenIntegrations?: () => void;
   onClose?: () => void;
 }
 
 export function RightLlamreiDrawer({
   messages,
   auditLogs,
+  aiProviders,
+  connectedAppsCount = 0,
   pendingContext,
   onClearContext,
   onSendPrompt,
   onApproveAudit,
   onUndoAudit,
+  onOpenIntegrations,
   onClose,
 }: Props) {
   const [input, setInput] = useState('');
@@ -29,8 +45,27 @@ export function RightLlamreiDrawer({
   const [listening, setListening] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [voiceNote, setVoiceNote] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<AiProviderId>(aiProviders?.activeProvider ?? 'auto');
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const stopVoiceRef = useRef<(() => void) | null>(null);
   const lastSpokenIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (aiProviders?.activeProvider) {
+      setSelectedProvider(aiProviders.activeProvider);
+    }
+  }, [aiProviders?.activeProvider]);
+
+  const activeProviderMeta = aiProviders?.providers.find((p) => p.id === selectedProvider);
+  const availableModels = activeProviderMeta?.models ?? [];
+
+  useEffect(() => {
+    if (activeProviderMeta) {
+      setSelectedModel(activeProviderMeta.selectedModel);
+    } else {
+      setSelectedModel('');
+    }
+  }, [selectedProvider, activeProviderMeta?.selectedModel]);
 
   useEffect(() => {
     if (!ttsEnabled || messages.length === 0) return;
@@ -63,13 +98,19 @@ export function RightLlamreiDrawer({
     if (!text.trim() || busy) return;
     setBusy(true);
     try {
-      await onSendPrompt(text.trim(), pendingContext);
+      await onSendPrompt(text.trim(), pendingContext, {
+        providerOverride: selectedProvider,
+        modelOverride: selectedModel || undefined,
+      });
       setInput('');
       if (pendingContext) onClearContext();
     } finally {
       setBusy(false);
     }
   };
+
+  const titleLabel =
+    aiProviders?.assistantPersona === 'llamrei' ? 'LLAMREI // JARVIS OS' : 'JARVIS // LLAMREI CO-COMMANDER';
 
   return (
     <aside
@@ -81,9 +122,9 @@ export function RightLlamreiDrawer({
         <div className="flex items-center gap-2">
           <span className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: 'var(--accent)' }} />
           <div>
-            <div className="text-xs font-mono-num font-bold">LLAMREI // CO-COMMANDER</div>
+            <div className="text-xs font-mono-num font-bold">{titleLabel}</div>
             <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              Approval Gate Active · Anti-Generic AI
+              Multi-Provider Gratis · Memory & Approval Gate
             </div>
           </div>
         </div>
@@ -117,6 +158,53 @@ export function RightLlamreiDrawer({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Compact Free Model & Composio Bar */}
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px] shrink-0">
+        <select
+          value={selectedProvider}
+          onChange={(e) => setSelectedProvider(e.target.value as AiProviderId)}
+          className="px-1.5 py-1 rounded border font-mono-num flex-1 min-w-[125px]"
+          style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
+          title="Pilih provider AI (model gratis & fallback)"
+        >
+          <option value="auto">⚡ Auto Gratis</option>
+          <option value="opencode_zen">🟢 OpenCode Zen</option>
+          <option value="opencode_cli">💻 OpenCode CLI</option>
+          <option value="openrouter">🌐 OpenRouter :free</option>
+          <option value="groq">⚡ Groq Free</option>
+          <option value="ollama">🏠 Ollama Lokal</option>
+          <option value="gemini">✨ Gemini</option>
+          <option value="local">🛡️ Rule Router</option>
+        </select>
+
+        {availableModels.length > 0 && (
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="px-1.5 py-1 rounded border font-mono-num flex-1 min-w-[120px] truncate"
+            style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+            title="Pilih model gratis aktif"
+          >
+            {availableModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        )}
+
+        {onOpenIntegrations && (
+          <button
+            onClick={onOpenIntegrations}
+            className="px-2 py-1 rounded border font-mono-num cursor-pointer hover:bg-white/5"
+            style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+            title="Kelola koneksi 150+ aplikasi via Composio"
+          >
+            🔌 {connectedAppsCount} Apps
+          </button>
+        )}
       </div>
 
       {/* Feed or Audit History */}
@@ -161,9 +249,13 @@ export function RightLlamreiDrawer({
                 >
                   <div className="flex items-center justify-between font-mono-num" style={{ color: 'var(--text-muted)' }}>
                     <span style={{ color: msg.role === 'user' ? 'var(--accent-2)' : 'var(--accent)' }}>
-                      {msg.role === 'user' ? 'ARTHUR → LLAMREI' : 'LLAMREI'}
+                      {msg.role === 'user'
+                        ? 'ARTHUR → JARVIS'
+                        : aiProviders?.assistantPersona === 'llamrei'
+                          ? 'LLAMREI'
+                          : 'JARVIS // LLAMREI'}
                     </span>
-                    {msg.model_used && <span>{msg.model_used}</span>}
+                    {msg.model_used && <span className="truncate max-w-[180px]">{msg.model_used}</span>}
                   </div>
                   <div className="whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--text-primary)' }}>
                     {msg.content}

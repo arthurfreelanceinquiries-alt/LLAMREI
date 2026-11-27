@@ -27,6 +27,17 @@ import {
   listChatMessages,
   undoAuditAction,
 } from './services/llamrei-agent.service.ts';
+import { getAiProvidersCatalog, type AiProviderId } from './services/ai-provider.service.ts';
+import {
+  disconnectComposioAccount,
+  executeComposioTool,
+  getComposioState,
+  initiateToolkitConnection,
+  listComposioToolkits,
+  listToolkitTools,
+  setEnabledComposioToolkits,
+  syncComposioConnections,
+} from './services/composio.service.ts';
 import {
   computeAutoScheduleForToday,
   getRealDataKpis,
@@ -180,7 +191,10 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
 
   // Bootstrap all modules in 1 fast roundtrip
   if (method === 'GET' && pathname === '/api/bootstrap') {
-    const network = await getNetworkMeshStatus();
+    const [network, aiProviders] = await Promise.all([
+      getNetworkMeshStatus(),
+      getAiProvidersCatalog(false),
+    ]);
     sendJson(res, 200, {
       workspace: getWorkspaceSnapshot(),
       bottlenecks: getWeeklyBottleneckReport(),
@@ -196,6 +210,8 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
       chatMessages: listChatMessages(),
       auditLogs: listAuditLogs(),
       aiBudget: getAiBudgetSummary(),
+      aiProviders,
+      composio: getComposioState(),
       waTagMentions: listWaTagMentions(),
       taskTemplates: listTaskTemplates(),
       appLaunchers: listAppLaunchers(),
@@ -511,7 +527,72 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     return true;
   }
 
-  // Llamrei Agent & Audit Log
+  // Llamrei / Jarvis Agent, Multi-Provider AI & Composio 150+ Apps
+  if (method === 'GET' && pathname === '/api/ai/providers') {
+    const urlObj = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const refresh = urlObj.searchParams.get('refresh') === '1';
+    sendJson(res, 200, await getAiProvidersCatalog(refresh));
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/ai/providers/refresh') {
+    const catalog = await getAiProvidersCatalog(true);
+    sseBus.emit('ai:providers_update', { refreshed: true });
+    sendJson(res, 200, catalog);
+    return true;
+  }
+
+  if (method === 'GET' && pathname === '/api/composio/state') {
+    sendJson(res, 200, getComposioState());
+    return true;
+  }
+  if (method === 'GET' && pathname === '/api/composio/toolkits') {
+    const urlObj = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const search = urlObj.searchParams.get('search') ?? undefined;
+    const category = urlObj.searchParams.get('category') ?? undefined;
+    const limit = Number(urlObj.searchParams.get('limit') ?? 80);
+    sendJson(res, 200, await listComposioToolkits({ search, category, limit }));
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/composio/connect') {
+    const body = await readJsonBody<{ toolkitSlug: string; callbackUrl?: string }>(req);
+    const out = await initiateToolkitConnection(body.toolkitSlug, body.callbackUrl);
+    if (!out.ok) sendError(res, 400, out.error ?? 'Gagal membuat link koneksi Composio');
+    else sendJson(res, 200, out);
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/composio/sync') {
+    sendJson(res, 200, await syncComposioConnections());
+    return true;
+  }
+  if (method === 'DELETE' && /^\/api\/composio\/connections\/[^/]+$/.test(pathname)) {
+    const id = decodeURIComponent(pathname.split('/').pop()!);
+    sendJson(res, 200, await disconnectComposioAccount(id));
+    return true;
+  }
+  if (method === 'GET' && pathname === '/api/composio/tools') {
+    const urlObj = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const slug = urlObj.searchParams.get('toolkitSlug') ?? '';
+    const limit = Number(urlObj.searchParams.get('limit') ?? 15);
+    if (!slug) {
+      sendError(res, 400, 'toolkitSlug query parameter is required');
+      return true;
+    }
+    sendJson(res, 200, { tools: await listToolkitTools(slug, limit) });
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/composio/tools/execute') {
+    const body = await readJsonBody<{ toolSlug: string; arguments?: Record<string, unknown> }>(req);
+    const out = await executeComposioTool(body.toolSlug, body.arguments ?? {});
+    if (!out.ok) sendError(res, 400, out.error ?? out.summary);
+    else sendJson(res, 200, out);
+    return true;
+  }
+  if (method === 'PATCH' && pathname === '/api/composio/enabled-toolkits') {
+    const body = await readJsonBody<{ toolkits: string[] }>(req);
+    sendJson(res, 200, { enabledToolkits: setEnabledComposioToolkits(body.toolkits ?? []) });
+    return true;
+  }
+
   if (method === 'GET' && pathname === '/api/agent/thread') {
     sendJson(res, 200, {
       messages: listChatMessages(),
@@ -521,8 +602,22 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     return true;
   }
   if (method === 'POST' && pathname === '/api/agent/prompt') {
-    const body = await readJsonBody<{ prompt: string; contextAttachment?: Record<string, unknown> | null }>(req);
-    const out = await handleLlamreiPrompt(body);
+    const body = await readJsonBody<{
+      prompt: string;
+      sessionId?: string;
+      contextAttachment?: Record<string, unknown> | null;
+      providerOverride?: AiProviderId;
+      modelOverride?: string;
+    }>(req);
+    const out = await handleLlamreiPrompt({
+      prompt: body.prompt,
+      sessionId: body.sessionId,
+      contextAttachment: body.contextAttachment,
+      aiOptions: {
+        providerOverride: body.providerOverride,
+        modelOverride: body.modelOverride,
+      },
+    });
     sendJson(res, 200, { ...out, aiBudget: getAiBudgetSummary(), auditLogs: listAuditLogs() });
     return true;
   }
@@ -784,12 +879,17 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     for (const [k, v] of Object.entries(body)) {
       stmt.run(k, JSON.stringify(v));
     }
+    sseBus.emit('ai:providers_update', { updated: true });
     sendJson(res, 200, getAllSettings());
     return true;
   }
   if (method === 'POST' && pathname === '/api/settings/secrets') {
     const body = await readJsonBody<{ key: SecretKeyName; value: string }>(req);
     const out = setSecret(body.key, body.value);
+    sseBus.emit('ai:providers_update', { secretUpdated: body.key });
+    if (body.key === 'COMPOSIO_API_KEY') {
+      sseBus.emit('composio:update', { configured: Boolean(body.value.trim()) });
+    }
     sendJson(res, 200, { ...out, secretStatus: getSecretStatus() });
     return true;
   }

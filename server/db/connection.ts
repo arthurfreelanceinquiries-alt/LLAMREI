@@ -348,9 +348,20 @@ function seedInitialData(db: DatabaseSync): void {
   // Default Settings
   const insSetting = db.prepare('INSERT INTO app_settings (key, value_json) VALUES (?, ?)');
   insSetting.run('theme', JSON.stringify('tactical'));
+  insSetting.run('assistant_persona', JSON.stringify('jarvis'));
+  insSetting.run('ai_provider', JSON.stringify('auto'));
+  insSetting.run('ai_free_fallback_chain', JSON.stringify(['opencode_zen', 'openrouter', 'groq', 'ollama', 'gemini']));
+  insSetting.run('opencode_model', JSON.stringify('big-pickle'));
+  insSetting.run('openrouter_model', JSON.stringify('meta-llama/llama-3.3-70b-instruct:free'));
+  insSetting.run('groq_model', JSON.stringify('llama-3.3-70b-versatile'));
+  insSetting.run('ollama_base_url', JSON.stringify('http://127.0.0.1:11434/v1'));
+  insSetting.run('ollama_model', JSON.stringify('qwen2.5:7b'));
   insSetting.run('ai_model', JSON.stringify('gemini-2.5-flash'));
   insSetting.run('ai_monthly_budget_usd', JSON.stringify(10.0));
   insSetting.run('paid_billing_verified', JSON.stringify(false));
+  insSetting.run('allow_opencode_cli_fallback', JSON.stringify(false));
+  insSetting.run('composio_user_id', JSON.stringify('arthur_reezan'));
+  insSetting.run('composio_enabled_toolkits', JSON.stringify(['gmail', 'googlecalendar', 'googledocs', 'googlesheets', 'notion', 'github']));
   insSetting.run('deep_work_window', JSON.stringify({ startHour: 8, endHour: 22 }));
   insSetting.run('watchlist', JSON.stringify(['OANDA:XAUUSD', 'FX:EURUSD', 'BINANCE:BTCUSDT', 'TVC:DXY']));
   insSetting.run('notion_database_id', JSON.stringify(''));

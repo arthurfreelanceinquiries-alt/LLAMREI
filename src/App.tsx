@@ -14,10 +14,12 @@ import { SettingsModal } from './components/modals/SettingsModal';
 import { MorningBentoView } from './components/morning/MorningBentoView';
 import { PhoneHubView } from './components/phonehub/PhoneHubView';
 import { TradingJournalView } from './components/trader/TradingJournalView';
+import { IntegrationsHubView } from './components/integrations/IntegrationsHubView';
 import { FocusedChatModal } from './components/watags/FocusedChatModal';
 import { apiRequest } from './lib/api-client';
 import { ThemeProvider } from './theme/ThemeContext';
 import type {
+  AiProviderId,
   AlarmReminderItem,
   BootstrapPayload,
   NavTab,
@@ -161,6 +163,8 @@ function DashboardShell() {
       'wa:proposal_declined',
       'journal:update',
       'docs:update',
+      'composio:update',
+      'ai:providers_update',
     ].forEach((evName) => es.addEventListener(evName, refresh));
 
     return () => es.close();
@@ -182,10 +186,23 @@ function DashboardShell() {
   const armedAlarmCount = data.alarms.filter((a) => a.enabled === 1 && a.kind === 'hard_alarm').length;
   const pendingChatCount = data.scheduledMessages.filter((m) => m.status === 'pending_approval').length;
   const unrepliedWaTagCount = data.waTagMentions.filter((m) => m.replied_status === 'unreplied').length;
+  const connectedAppsCount = data.composio?.connections.filter((c) => c.status === 'active').length ?? 0;
 
-  const sendPromptToLlamrei = async (prompt: string, context?: Record<string, unknown> | null) => {
+  const sendPromptToLlamrei = async (
+    prompt: string,
+    context?: Record<string, unknown> | null,
+    aiOverride?: { providerOverride?: AiProviderId; modelOverride?: string },
+  ) => {
     setCopilotOpen(true);
-    await apiRequest('/api/agent/prompt', { method: 'POST', body: { prompt, contextAttachment: context ?? null } });
+    await apiRequest('/api/agent/prompt', {
+      method: 'POST',
+      body: {
+        prompt,
+        contextAttachment: context ?? null,
+        providerOverride: aiOverride?.providerOverride,
+        modelOverride: aiOverride?.modelOverride,
+      },
+    });
     await loadBootstrap();
   };
 
@@ -254,6 +271,7 @@ function DashboardShell() {
           unrepliedWaTagCount={unrepliedWaTagCount}
           openTaskCount={openTaskCount}
           armedAlarmCount={armedAlarmCount}
+          connectedAppsCount={connectedAppsCount}
           activeTimer={data.workspace.activeTimer}
           onStopTimer={(tid) => void apiRequest(`/api/workspace/tasks/${tid}/timer/stop`, { method: 'POST', body: {} }).then(loadBootstrap)}
           onCreateSpace={(name) => void apiRequest('/api/workspace/spaces', { method: 'POST', body: { name } }).then(loadBootstrap)}
@@ -659,16 +677,31 @@ function DashboardShell() {
               }}
             />
           )}
+
+          {activeTab === 'integrations' && (
+            <IntegrationsHubView
+              composio={data.composio}
+              onRefreshBootstrap={loadBootstrap}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onAskJarvis={(prompt) => {
+                setCopilotOpen(true);
+                void sendPromptToLlamrei(prompt);
+              }}
+            />
+          )}
         </main>
 
-        {/* RIGHT LLAMREI CO-COMMANDER DRAWER */}
+        {/* RIGHT JARVIS // LLAMREI CO-COMMANDER DRAWER */}
         {copilotOpen && (
           <RightLlamreiDrawer
             messages={data.chatMessages}
             auditLogs={data.auditLogs}
+            aiProviders={data.aiProviders}
+            connectedAppsCount={connectedAppsCount}
             pendingContext={pendingContext}
             onClearContext={() => setPendingContext(null)}
             onSendPrompt={sendPromptToLlamrei}
+            onOpenIntegrations={() => setActiveTab('integrations')}
             onClose={() => setCopilotOpen(false)}
             onApproveAudit={async (auditId) => {
               await apiRequest(`/api/agent/audit/${auditId}/approve`, { method: 'POST', body: {} });
@@ -779,16 +812,22 @@ function DashboardShell() {
       />
 
       <SettingsModal
+        key={settingsOpen ? 'settings-open' : 'settings-closed'}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         settings={data.settings}
         secretStatus={data.secretStatus}
+        aiProviders={data.aiProviders}
         onSaveSettings={async (patch) => {
           await apiRequest('/api/settings', { method: 'PATCH', body: patch });
           await loadBootstrap();
         }}
         onSaveSecret={async (key, value) => {
           await apiRequest('/api/settings/secrets', { method: 'POST', body: { key, value } });
+          await loadBootstrap();
+        }}
+        onRefreshProviders={async () => {
+          await apiRequest('/api/ai/providers/refresh', { method: 'POST', body: {} });
           await loadBootstrap();
         }}
       />

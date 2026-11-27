@@ -1,12 +1,27 @@
 import { getDb, todayWibIsoDate, wibOffsetIso } from '../db/connection.ts';
 import { sseBus } from '../lib/sse.ts';
-import { getSecret } from './secret.service.ts';
-import { scrubPiiForLlm } from './wa-export.service.ts';
+import {
+  getAiBudgetSummary,
+  getAiSettingsSnapshot,
+  invokeAiWithFallback,
+  type AiInvocationOptions,
+  type UnifiedMessage,
+  type UnifiedToolDef,
+} from './ai-provider.service.ts';
 import {
   createOrUpdateHardAlarm,
   createStandaloneCalendarEvent,
   getNextArmedAlarm,
+  listAlarmsAndReminders,
+  listCalendarEvents,
 } from './alarm-calendar.service.ts';
+import {
+  executeComposioTool,
+  getActiveComposioToolsForAgent,
+  getComposioState,
+  isReadOnlyComposioTool,
+  summarizeToolResult,
+} from './composio.service.ts';
 import { computeAutoScheduleForToday, getRealDataKpis } from './lifeos.service.ts';
 import { getMarketAndNewsFeed } from './market.service.ts';
 import {
@@ -22,6 +37,8 @@ import {
   listScheduledMessages,
   updateScheduledMessageStatus,
 } from './scheduler.service.ts';
+import { getTradingJournalState } from './trading-journal.service.ts';
+import { listWaTagMentions, scrubPiiForLlm } from './wa-export.service.ts';
 import {
   createTask,
   deleteTask,
@@ -29,6 +46,8 @@ import {
   getWorkspaceSnapshot,
   updateTask,
 } from './workspace.service.ts';
+
+export { getAiBudgetSummary };
 
 export interface ApprovalCardData {
   auditId: string;
@@ -64,48 +83,6 @@ export interface AuditLogRow {
   created_at: string;
 }
 
-export function getAiBudgetSummary(): {
-  monthlySpentUsd: number;
-  monthlyCapUsd: number;
-  remainingUsd: number;
-  blocked: boolean;
-  callsCount: number;
-} {
-  const db = getDb();
-  const monthPrefix = todayWibIsoDate().slice(0, 7);
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS spent, COUNT(*) AS cnt
-       FROM ai_usage_ledger WHERE created_at LIKE ?`,
-    )
-    .get(`${monthPrefix}%`) as { spent: number; cnt: number };
-
-  const capRow = db.prepare("SELECT value_json FROM app_settings WHERE key = 'ai_monthly_budget_usd'").get() as
-    | { value_json: string }
-    | undefined;
-  const monthlyCapUsd = capRow ? Number(JSON.parse(capRow.value_json)) : 10.0;
-  const monthlySpentUsd = Math.round(row.spent * 10000) / 10000;
-  return {
-    monthlySpentUsd,
-    monthlyCapUsd,
-    remainingUsd: Math.max(0, Math.round((monthlyCapUsd - monthlySpentUsd) * 10000) / 10000),
-    blocked: monthlySpentUsd >= monthlyCapUsd,
-    callsCount: row.cnt,
-  };
-}
-
-function recordAiUsage(model: string, feature: string, promptTokens: number, completionTokens: number): void {
-  const db = getDb();
-  const isPro = model.includes('pro');
-  const rateIn = isPro ? 0.00000125 : 0.00000015;
-  const rateOut = isPro ? 0.000005 : 0.0000006;
-  const cost = promptTokens * rateIn + completionTokens * rateOut;
-  db.prepare(
-    `INSERT INTO ai_usage_ledger (id, provider, model, feature, prompt_tokens, completion_tokens, estimated_cost_usd)
-     VALUES (?, 'gemini', ?, ?, ?, ?, ?)`,
-  ).run(`ai_${crypto.randomUUID().slice(0, 8)}`, model, feature, promptTokens, completionTokens, cost);
-}
-
 export function listChatMessages(sessionId = 'sess_main'): ChatMessageRow[] {
   const db = getDb();
   return db
@@ -136,7 +113,7 @@ export function buildMorningBriefingText(): string {
   const unreadTags = phone.notifications.filter((n) => n.is_mention_tag === 1 && !n.replied_at);
 
   const lines: string[] = [
-    `**MORNING BRIEFING LLAMREI (${today})**`,
+    `**MORNING BRIEFING JARVIS // LLAMREI (${today})**`,
     `- **Kesiapan & Tilt Guard:** ${
       kpis.todayCheckIn
         ? `Tidur ${kpis.todayCheckIn.sleep_hours}j · Energi ${kpis.todayCheckIn.energy_level}/5 · Risiko **${kpis.todayCheckIn.tilt_risk_level.toUpperCase()}**. ${kpis.todayCheckIn.tilt_guard_advice ?? ''}`
@@ -210,79 +187,193 @@ function buildSystemPrompt(): string {
   const ws = getWorkspaceSnapshot();
   const phone = getPhoneHubState();
   const bottleneck = getWeeklyBottleneckReport();
+  const aiCfg = getAiSettingsSnapshot();
+  const composio = getComposioState();
+  const activeApps = composio.connections.filter((c) => c.status === 'active').map((c) => c.toolkit_name);
+
+  const identityLine =
+    aiCfg.assistantPersona === 'jarvis'
+      ? 'Kamu adalah JARVIS (identitas co-commander dari sistem LLAMREI), asisten personal cerdas milik Arthur Reezan (mahasiswa akhir FEB UKRIDA NIM 312023002 & trader aktif).'
+      : 'Kamu adalah LLAMREI (Co-Commander / Jarvis OS), asisten personal milik Arthur Reezan (mahasiswa akhir FEB UKRIDA NIM 312023002 & trader aktif).';
 
   return [
-    'Kamu adalah LLAMREI, personal co-commander & performance strategist milik Arthur Reezan (mahasiswa akhir FEB UKRIDA NIM 312023002 & trader).',
-    'ATURAN ANTI-GENERIK (FR-52): Jangan pernah memberi saran motivasi klise atau normatif. Selalu rujuk data nyata Arthur di bawah ini.',
-    'ATURAN KEAMANAN: Jangan mengarang angka harga pasar atau persentase KPI; gunakan hanya data dari tool/konteks.',
-    `KONTEKS NYATA SAAT INI: Execution=${kpis.executionScorePercent}%, DeepWork=${kpis.deepWorkHoursTotal}h, TiltRisk=${kpis.todayCheckIn?.tilt_risk_level ?? 'unknown'}, Lists=${ws.lists.map((l) => `${l.id}:${l.name}`).join(', ')}, Bottleneck="${bottleneck.summaryAdvice}", Phone=${phone.devices[0]?.name ?? 'none'} (${phone.devices[0]?.battery_level ?? 0}%).`,
+    identityLine,
+    'ATURAN ANTI-GENERIK (FR-52): Jangan pernah memberi saran motivasi klise atau normatif. Selalu rujuk data nyata Arthur dari tool/konteks.',
+    'ATURAN KEAMANAN & APPROVAL GATE: Jangan mengarang angka pasar atau KPI. Aksi tulis/kirim (buat tugas, pasang alarm, kirim chat/email, ubah kalender eksternal) otomatis meminta persetujuan via Approval Card.',
+    'MULTI-STEP REASONING: Kamu boleh memanggil tool baca (list tugas, cek kalender, cek WA, cek trading journal, atau tool Composio READ) beberapa kali sebelum menjawab.',
+    `KONTEKS NYATA: Execution=${kpis.executionScorePercent}%, DeepWork=${kpis.deepWorkHoursTotal}h, TiltRisk=${kpis.todayCheckIn?.tilt_risk_level ?? 'unknown'}, Lists=${ws.lists.map((l) => `${l.id}:${l.name}`).join(', ')}, Bottleneck="${bottleneck.summaryAdvice}", Phone=${phone.devices[0]?.name ?? 'none'} (${phone.devices[0]?.battery_level ?? 0}%), ComposioConnectedApps=[${activeApps.join(', ') || 'belum ada'}].`,
     'Jawab dalam Bahasa Indonesia yang ringkas, tajam, dan terstruktur.',
   ].join('\n');
 }
 
-const GEMINI_TOOLS = [
+const LOCAL_TOOLS: UnifiedToolDef[] = [
   {
-    functionDeclarations: [
-      {
-        name: 'schedule_outbound_chat',
-        description: 'Menyiapkan draf & jadwal pesan keluar (WhatsApp/Telegram) untuk disetujui Arthur di Approval Card.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            recipientName: { type: 'STRING' },
-            purpose: { type: 'STRING' },
-            messageBody: { type: 'STRING' },
-            scheduledAtIso: { type: 'STRING' },
-          },
-          required: ['recipientName', 'purpose', 'messageBody', 'scheduledAtIso'],
-        },
+    name: 'get_morning_briefing_data',
+    description: 'Membaca ringkasan lengkap hari ini: Tilt Guard, KPI tugas, alarm berikutnya, notifikasi HP, dan kalender ekonomi.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_clickup_tasks',
+    description: 'Membaca daftar tugas ClickUp lokal (bisa filter status, priority, atau kata kunci search).',
+    parameters: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', description: 'Filter status mis. To Do, In Progress, Review, Done' },
+        priority: { type: 'string', description: 'urgent, high, normal, low' },
+        search: { type: 'string', description: 'Kata kunci judul tugas' },
       },
-      {
-        name: 'create_clickup_task',
-        description: 'Membuat tugas baru di ruang kerja ClickUp beserta tenggat, jadwal kalender, dan opsi Hard Alarm.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            title: { type: 'STRING' },
-            listId: { type: 'STRING' },
-            priority: { type: 'STRING', enum: ['urgent', 'high', 'normal', 'low'] },
-            dueAtIso: { type: 'STRING' },
-            hardAlarm: { type: 'BOOLEAN' },
-            subtasks: { type: 'ARRAY', items: { type: 'STRING' } },
-          },
-          required: ['title'],
-        },
+    },
+  },
+  {
+    name: 'list_calendar_and_alarms',
+    description: 'Membaca agenda kalender dan daftar alarm/reminder aktif.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_wa_mentions_and_proposals',
+    description: 'Membaca mention WhatsApp yang belum dibalas dan usulan agenda kalender yang menunggu persetujuan.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_trading_journal_summary',
+    description: 'Membaca statistik jurnal trading (win rate, total R-multiple, net PnL, pola emosi calm vs tilt).',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'schedule_outbound_chat',
+    description: 'Menyiapkan draf & jadwal pesan keluar (WhatsApp/Telegram) untuk disetujui Arthur di Approval Card.',
+    parameters: {
+      type: 'object',
+      properties: {
+        recipientName: { type: 'string' },
+        purpose: { type: 'string' },
+        messageBody: { type: 'string' },
+        scheduledAtIso: { type: 'string' },
       },
-      {
-        name: 'set_task_alarm_and_calendar',
-        description: 'Memasang Hard Alarm & blok Kalender Website pada waktu tertentu.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            title: { type: 'STRING' },
-            triggerAtIso: { type: 'STRING' },
-            taskId: { type: 'STRING' },
-          },
-          required: ['title', 'triggerAtIso'],
-        },
+      required: ['recipientName', 'purpose', 'messageBody', 'scheduledAtIso'],
+    },
+  },
+  {
+    name: 'create_clickup_task',
+    description: 'Membuat tugas baru di ruang kerja ClickUp beserta tenggat, jadwal kalender, dan opsi Hard Alarm.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        listId: { type: 'string' },
+        priority: { type: 'string', enum: ['urgent', 'high', 'normal', 'low'] },
+        dueAtIso: { type: 'string' },
+        hardAlarm: { type: 'boolean' },
+        subtasks: { type: 'array', items: { type: 'string' } },
       },
-      {
-        name: 'auto_schedule_clickup_day',
-        description: 'Menyusun blok jadwal tugas ClickUp hari ini gaya Motion, menghindari rapat & rilis CPI/FOMC.',
-        parameters: { type: 'OBJECT', properties: {} },
+      required: ['title'],
+    },
+  },
+  {
+    name: 'set_task_alarm_and_calendar',
+    description: 'Memasang Hard Alarm & blok Kalender Website pada waktu tertentu.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        triggerAtIso: { type: 'string' },
+        taskId: { type: 'string' },
       },
-      {
-        name: 'control_paired_phone',
-        description: 'Mengontrol HP Android via NectarLink (dnd_on, dnd_off, find_phone).',
-        parameters: {
-          type: 'OBJECT',
-          properties: { action: { type: 'STRING', enum: ['dnd_on', 'dnd_off', 'find_phone'] } },
-          required: ['action'],
-        },
-      },
-    ],
+      required: ['title', 'triggerAtIso'],
+    },
+  },
+  {
+    name: 'auto_schedule_clickup_day',
+    description: 'Menyusun blok jadwal tugas ClickUp hari ini gaya Motion, menghindari rapat & rilis CPI/FOMC.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'control_paired_phone',
+    description: 'Mengontrol HP Android via NectarLink (dnd_on, dnd_off, find_phone).',
+    parameters: {
+      type: 'object',
+      properties: { action: { type: 'string', enum: ['dnd_on', 'dnd_off', 'find_phone'] } },
+      required: ['action'],
+    },
   },
 ];
+
+const LOCAL_READ_ONLY_TOOLS = new Set([
+  'get_morning_briefing_data',
+  'list_clickup_tasks',
+  'list_calendar_and_alarms',
+  'list_wa_mentions_and_proposals',
+  'get_trading_journal_summary',
+]);
+
+async function executeReadOnlyTool(
+  name: string,
+  args: Record<string, unknown>,
+  fetchImpl?: typeof fetch,
+): Promise<string> {
+  if (name === 'get_morning_briefing_data') {
+    return buildMorningBriefingText();
+  }
+  if (name === 'list_clickup_tasks') {
+    const ws = getWorkspaceSnapshot();
+    const statusFilter = typeof args.status === 'string' ? args.status.toLowerCase() : null;
+    const prioFilter = typeof args.priority === 'string' ? args.priority.toLowerCase() : null;
+    const searchFilter = typeof args.search === 'string' ? args.search.toLowerCase() : null;
+    const filtered = ws.tasks
+      .filter((t) => !t.parent_task_id)
+      .filter((t) => !statusFilter || t.status.toLowerCase() === statusFilter)
+      .filter((t) => !prioFilter || t.priority.toLowerCase() === prioFilter)
+      .filter((t) => !searchFilter || t.title.toLowerCase().includes(searchFilter))
+      .slice(0, 15)
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        due_at: t.due_at,
+        hard_alarm: Boolean(t.hard_alarm_enabled),
+      }));
+    return JSON.stringify({ count: filtered.length, tasks: filtered });
+  }
+  if (name === 'list_calendar_and_alarms') {
+    const events = listCalendarEvents().slice(0, 15).map((e) => ({
+      id: e.id,
+      title: e.title,
+      start_at: e.start_at,
+      source: e.source,
+    }));
+    const alarms = listAlarmsAndReminders()
+      .filter((a) => a.enabled === 1)
+      .slice(0, 12)
+      .map((a) => ({ id: a.id, title: a.title, kind: a.kind, trigger_at: a.trigger_at, status: a.status }));
+    return JSON.stringify({ events, alarms });
+  }
+  if (name === 'list_wa_mentions_and_proposals') {
+    const mentions = listWaTagMentions()
+      .slice(0, 12)
+      .map((m) => ({
+        id: m.id,
+        group: m.group_name,
+        sender: m.sender_display,
+        topic: m.topic_category,
+        urgency: m.ai_urgency,
+        replied: m.replied_status,
+        proposal: m.has_event_proposal ? { title: m.proposed_event_title, start: m.proposed_event_start, status: m.proposal_status } : null,
+        text: scrubPiiForLlm(m.quoted_message.slice(0, 180)),
+      }));
+    return JSON.stringify({ mentions });
+  }
+  if (name === 'get_trading_journal_summary') {
+    const j = getTradingJournalState();
+    return JSON.stringify({ stats: j.stats, recentEntries: j.entries.slice(0, 5) });
+  }
+  if (name.startsWith('composio__')) {
+    const slug = name.replace(/^composio__/, '');
+    const res = await executeComposioTool(slug, args, fetchImpl);
+    return summarizeToolResult(res);
+  }
+  return JSON.stringify({ error: `Unknown read-only tool: ${name}` });
+}
 
 function runLocalDeterministicRouter(
   prompt: string,
@@ -358,10 +449,11 @@ function runLocalDeterministicRouter(
   // 4. Hard Alarm & Calendar
   if (/\b(alarm|ingatkan|pasang alarm)\b/i.test(lower)) {
     const triggerAt = parseIndonesianTimeToIso(prompt);
-    const cleanTitle = prompt
-      .replace(/^(llamrei,?\s*)?(tolong\s*)?(pasang|set|buat)\s*(hard\s*)?alarm\s*/i, '')
-      .replace(/(?:jam|pukul)\s*\d{1,2}(?:[:.]\d{2})?/i, '')
-      .trim() || 'Alarm Fokus Llamrei';
+    const cleanTitle =
+      prompt
+        .replace(/^(llamrei|jarvis,?\s*)?(tolong\s*)?(pasang|set|buat)\s*(hard\s*)?alarm\s*/i, '')
+        .replace(/(?:jam|pukul)\s*\d{1,2}(?:[:.]\d{2})?/i, '')
+        .trim() || 'Alarm Fokus Llamrei';
     const card = createPendingApprovalAudit({
       sessionId,
       userCommand: prompt,
@@ -393,9 +485,10 @@ function runLocalDeterministicRouter(
 
   // 6. Create or Split ClickUp Task
   if (/\b(buat tugas|create task|tambah tugas|pecah tugas)\b/i.test(lower)) {
-    const title = prompt
-      .replace(/^(llamrei,?\s*)?(tolong\s*)?(buat|tambah|create)\s*tugas\s*/i, '')
-      .trim() || 'Tugas Baru dari Llamrei';
+    const title =
+      prompt
+        .replace(/^(llamrei|jarvis,?\s*)?(tolong\s*)?(buat|tambah|create)\s*tugas\s*/i, '')
+        .trim() || 'Tugas Baru dari Jarvis/Llamrei';
     const defaultList = ws.lists[0]?.id ?? 'list_bab4';
     const priority = /urgent|mendesak/i.test(lower) ? 'urgent' : /high|tinggi/i.test(lower) ? 'high' : 'normal';
     const dueAtIso = parseIndonesianTimeToIso(prompt);
@@ -439,8 +532,78 @@ function runLocalDeterministicRouter(
   }
 
   return {
-    reply: `Perintah diterima: "${prompt}".\nContoh perintah aksi cepat yang langsung terhubung ke Approval Card:\n• *"Jadwalkan chat ke Raka jam 19:00 soal revisi slide"*\n• *"Buat tugas Bab 4 Uji MRA prioritas urgent jam 16:00"*\n• *"Pasang alarm jam 07:00 review chart XAUUSD"*\n• *"Auto schedule hari ini"* atau *"Briefing pagi"*`,
+    reply: `Perintah diterima: "${prompt}".\nContoh perintah cepat:\n• *"Jadwalkan chat ke Raka jam 19:00 soal revisi slide"*\n• *"Buat tugas Bab 4 Uji MRA prioritas urgent jam 16:00"*\n• *"Pasang alarm jam 07:00 review chart XAUUSD"*\n• *"Auto schedule hari ini"* atau *"Briefing pagi"*\n• Atau hubungkan OpenCode/OpenRouter/Groq + Composio di ⚙️ Pengaturan untuk perintah lintas 150+ aplikasi.`,
     approvalCard: null,
+  };
+}
+
+function buildApprovalCardForToolCall(params: {
+  toolName: string;
+  args: Record<string, unknown>;
+  sessionId: string;
+  userPrompt: string;
+}): { card: ApprovalCardData; replyFallback: string } {
+  const { toolName, args, sessionId, userPrompt } = params;
+
+  if (toolName === 'schedule_outbound_chat') {
+    const name = String(args.recipientName ?? 'Kontak');
+    const contact = findContactByNameOrAlias(name);
+    const body = String(args.messageBody ?? '');
+    const schedAt = String(args.scheduledAtIso ?? wibOffsetIso(0, 19, 0));
+    const draft = createScheduledMessageDraft({
+      contactId: contact?.id ?? null,
+      recipientName: contact?.name ?? name,
+      recipientAddress: contact?.phone_e164 ?? '6281200000000',
+      channel: contact?.preferred_channel ?? 'nectarlink_bridge',
+      purpose: String(args.purpose ?? 'Pesan terjadwal'),
+      messageBody: body,
+      scheduledAt: schedAt,
+      createdByPrompt: userPrompt,
+    });
+    const card = createPendingApprovalAudit({
+      sessionId,
+      userCommand: userPrompt,
+      toolName,
+      title: `Jadwal Chat → ${draft.recipient_name}`,
+      summary: `Waktu: ${schedAt} · "${body}"`,
+      args: { ...args, scheduledMessageId: draft.id },
+      scheduledMessageId: draft.id,
+      waMeUrl: draft.waMeUrl,
+    });
+    return {
+      card,
+      replyFallback: `Draf chat untuk **${draft.recipient_name}** sudah disiapkan di kartu persetujuan di bawah.`,
+    };
+  }
+
+  if (toolName.startsWith('composio__')) {
+    const toolSlug = toolName.replace(/^composio__/, '');
+    const toolkit = toolSlug.split('_')[0] ?? 'COMPOSIO';
+    const card = createPendingApprovalAudit({
+      sessionId,
+      userCommand: userPrompt,
+      toolName: 'composio_execute_tool',
+      title: `[${toolkit}] Jalankan ${toolSlug}`,
+      summary: `Parameter: ${JSON.stringify(args).slice(0, 260)}`,
+      args: { toolSlug, arguments: args },
+    });
+    return {
+      card,
+      replyFallback: `Aksi integrasi **${toolSlug}** membutuhkan persetujuan Anda. Klik **Approve & Jalankan** pada kartu di bawah untuk mengeksekusinya.`,
+    };
+  }
+
+  const card = createPendingApprovalAudit({
+    sessionId,
+    userCommand: userPrompt,
+    toolName,
+    title: `Aksi Co-Commander: ${toolName}`,
+    summary: JSON.stringify(args),
+    args,
+  });
+  return {
+    card,
+    replyFallback: `Silakan setujui aksi **${toolName}** pada kartu konfirmasi di bawah.`,
   };
 }
 
@@ -448,11 +611,29 @@ export async function handleLlamreiPrompt(input: {
   prompt: string;
   sessionId?: string;
   contextAttachment?: Record<string, unknown> | null;
-}): Promise<{ userMessage: ChatMessageRow; assistantMessage: ChatMessageRow; usedGemini: boolean }> {
+  aiOptions?: AiInvocationOptions;
+}): Promise<{
+  userMessage: ChatMessageRow;
+  assistantMessage: ChatMessageRow;
+  usedGemini: boolean;
+  providerUsed: string;
+}> {
   const db = getDb();
   const sessionId = input.sessionId ?? 'sess_main';
-  const userMsgId = `cmsg_${crypto.randomUUID().slice(0, 8)}`;
 
+  // Load recent conversation memory BEFORE inserting current prompt
+  const historyRows = db
+    .prepare(
+      `SELECT role, content FROM chat_messages
+       WHERE session_id = ? AND role IN ('user', 'assistant')
+       ORDER BY created_at DESC, rowid DESC LIMIT 10`,
+    )
+    .all(sessionId) as Array<{ role: 'user' | 'assistant'; content: string }>;
+  const priorMessages: UnifiedMessage[] = historyRows
+    .reverse()
+    .map((r) => ({ role: r.role, content: scrubPiiForLlm(r.content.slice(0, 1200)) }));
+
+  const userMsgId = `cmsg_${crypto.randomUUID().slice(0, 8)}`;
   db.prepare(
     `INSERT INTO chat_messages (id, session_id, role, content, context_attachment_json)
      VALUES (?, ?, 'user', ?, ?)`,
@@ -463,128 +644,114 @@ export async function handleLlamreiPrompt(input: {
     input.contextAttachment ? JSON.stringify(input.contextAttachment) : null,
   );
 
-  const geminiKey = getSecret('GEMINI_API_KEY');
-  const budget = getAiBudgetSummary();
-  const modelRow = db.prepare("SELECT value_json FROM app_settings WHERE key = 'ai_model'").get() as
-    | { value_json: string }
-    | undefined;
-  const model = modelRow ? (JSON.parse(modelRow.value_json) as string) : 'gemini-2.5-flash';
-  const paidRow = db.prepare("SELECT value_json FROM app_settings WHERE key = 'paid_billing_verified'").get() as
-    | { value_json: string }
-    | undefined;
-  const paidVerified = paidRow ? Boolean(JSON.parse(paidRow.value_json)) : false;
   const isWaContext =
     Boolean(input.contextAttachment?.group_name || input.contextAttachment?.quoted_message) ||
     /grup\s+|whatsapp|ekspor chat/i.test(input.prompt);
 
+  const ctxText = input.contextAttachment
+    ? `\n\nKONTEKS ITEM TERLAMPIR: ${scrubPiiForLlm(JSON.stringify(input.contextAttachment))}`
+    : '';
+  const safePrompt = scrubPiiForLlm(input.prompt);
+
+  const loopMessages: UnifiedMessage[] = [
+    { role: 'system', content: buildSystemPrompt() },
+    ...priorMessages,
+    { role: 'user', content: `${safePrompt}${ctxText}` },
+  ];
+
+  const composioTools = await getActiveComposioToolsForAgent(input.aiOptions?.fetchImpl);
+  const allTools: UnifiedToolDef[] = [...LOCAL_TOOLS, ...composioTools];
+
   let replyText = '';
   let approvalCard: ApprovalCardData | null = null;
+  let providerUsed = 'local';
+  let modelLabel = 'llamrei-local-router';
   let usedGemini = false;
 
-  if (geminiKey && !budget.blocked && (!isWaContext || paidVerified)) {
-    try {
-      const ctxText = input.contextAttachment
-        ? `\n\nKONTEKS ITEM TERLAMPIR: ${scrubPiiForLlm(JSON.stringify(input.contextAttachment))}`
-        : '';
-      const safePrompt = scrubPiiForLlm(input.prompt);
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: buildSystemPrompt() }] },
-            contents: [{ role: 'user', parts: [{ text: `${safePrompt}${ctxText}` }] }],
-            tools: GEMINI_TOOLS,
-          }),
-          signal: AbortSignal.timeout(15000),
-        },
-      );
+  const MAX_REACT_STEPS = 4;
+  for (let step = 0; step < MAX_REACT_STEPS; step++) {
+    const aiRes = await invokeAiWithFallback(loopMessages, allTools, {
+      ...input.aiOptions,
+      isSensitiveWaContext: isWaContext,
+    });
+    if (!aiRes) break;
 
-      if (res.ok) {
-        const data = (await res.json()) as {
-          candidates?: Array<{
-            content?: {
-              parts?: Array<{
-                text?: string;
-                functionCall?: { name: string; args?: Record<string, unknown> };
-              }>;
-            };
-          }>;
-          usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
-        };
-        recordAiUsage(
-          model,
-          'agent',
-          data.usageMetadata?.promptTokenCount ?? 300,
-          data.usageMetadata?.candidatesTokenCount ?? 150,
-        );
-        usedGemini = true;
-        const parts = data.candidates?.[0]?.content?.parts ?? [];
-        const fnPart = parts.find((p) => p.functionCall);
-        const textPart = parts.map((p) => p.text ?? '').join('\n').trim();
+    providerUsed = aiRes.providerUsed;
+    modelLabel = `${aiRes.providerUsed}/${aiRes.modelUsed}${aiRes.isFreeTier ? ' (FREE)' : ''}`;
+    usedGemini = aiRes.providerUsed === 'gemini';
 
-        if (fnPart?.functionCall) {
-          const fc = fnPart.functionCall;
-          const args = fc.args ?? {};
-          if (fc.name === 'schedule_outbound_chat') {
-            const name = String(args.recipientName ?? 'Kontak');
-            const contact = findContactByNameOrAlias(name);
-            const body = String(args.messageBody ?? '');
-            const schedAt = String(args.scheduledAtIso ?? wibOffsetIso(0, 19, 0));
-            const draft = createScheduledMessageDraft({
-              contactId: contact?.id ?? null,
-              recipientName: contact?.name ?? name,
-              recipientAddress: contact?.phone_e164 ?? '6281200000000',
-              channel: contact?.preferred_channel ?? 'nectarlink_bridge',
-              purpose: String(args.purpose ?? 'Pesan terjadwal'),
-              messageBody: body,
-              scheduledAt: schedAt,
-              createdByPrompt: input.prompt,
-            });
-            approvalCard = createPendingApprovalAudit({
-              sessionId,
-              userCommand: input.prompt,
-              toolName: fc.name,
-              title: `Jadwal Chat → ${draft.recipient_name}`,
-              summary: `Waktu: ${schedAt} · "${body}"`,
-              args: { ...args, scheduledMessageId: draft.id },
-              scheduledMessageId: draft.id,
-              waMeUrl: draft.waMeUrl,
-            });
-            replyText = textPart || `Draf chat untuk **${draft.recipient_name}** sudah disiapkan di kartu persetujuan di bawah.`;
-          } else if (fc.name === 'control_paired_phone') {
-            const devId = getPhoneHubState().devices[0]?.id ?? 'dev_infinix_note30';
-            if (args.action === 'find_phone') await ringPhone();
-            if (args.action === 'dnd_on') await setPhoneControlToggle(devId, 'dnd_enabled', true);
-            if (args.action === 'dnd_off') await setPhoneControlToggle(devId, 'dnd_enabled', false);
-            replyText = textPart || `Perintah NectarLink \`${String(args.action)}\` dijalankan.`;
-          } else {
-            approvalCard = createPendingApprovalAudit({
-              sessionId,
-              userCommand: input.prompt,
-              toolName: fc.name,
-              title: `Aksi Llamrei: ${fc.name}`,
-              summary: JSON.stringify(args),
-              args,
-            });
-            replyText = textPart || `Silakan setujui aksi **${fc.name}** pada kartu konfirmasi di bawah.`;
-          }
-        } else if (textPart) {
-          replyText = textPart;
-        }
-      }
-    } catch {
-      usedGemini = false;
+    if (aiRes.toolCalls.length === 0) {
+      replyText = aiRes.text;
+      break;
     }
+
+    // Check if any requested tool needs immediate execution (phone toggle) or Approval Card
+    let executedAnyReadOnly = false;
+    const assistantTurnCalls = aiRes.toolCalls;
+    const toolResultMessages: UnifiedMessage[] = [];
+
+    for (const tc of assistantTurnCalls) {
+      const isComposioRead = tc.name.startsWith('composio__') && isReadOnlyComposioTool(tc.name.replace(/^composio__/, ''));
+      if (LOCAL_READ_ONLY_TOOLS.has(tc.name) || isComposioRead) {
+        const resultStr = await executeReadOnlyTool(tc.name, tc.args, input.aiOptions?.fetchImpl);
+        toolResultMessages.push({
+          role: 'tool',
+          toolCallId: tc.id,
+          toolName: tc.name,
+          content: resultStr,
+        });
+        executedAnyReadOnly = true;
+      } else if (tc.name === 'control_paired_phone') {
+        const devId = getPhoneHubState().devices[0]?.id ?? 'dev_infinix_note30';
+        if (tc.args.action === 'find_phone') await ringPhone();
+        if (tc.args.action === 'dnd_on') await setPhoneControlToggle(devId, 'dnd_enabled', true);
+        if (tc.args.action === 'dnd_off') await setPhoneControlToggle(devId, 'dnd_enabled', false);
+        toolResultMessages.push({
+          role: 'tool',
+          toolCallId: tc.id,
+          toolName: tc.name,
+          content: JSON.stringify({ ok: true, action: tc.args.action }),
+        });
+        executedAnyReadOnly = true;
+      } else {
+        // Write/outbound tool -> Pause cleanly on Approval Card
+        const built = buildApprovalCardForToolCall({
+          toolName: tc.name,
+          args: tc.args,
+          sessionId,
+          userPrompt: input.prompt,
+        });
+        approvalCard = built.card;
+        replyText = aiRes.text || built.replyFallback;
+        break;
+      }
+    }
+
+    if (approvalCard) break;
+
+    if (executedAnyReadOnly) {
+      loopMessages.push({
+        role: 'assistant',
+        content: aiRes.text,
+        toolCalls: assistantTurnCalls,
+      });
+      loopMessages.push(...toolResultMessages);
+      continue;
+    }
+
+    replyText = aiRes.text;
+    break;
   }
 
-  if (!replyText) {
+  if (!replyText && !approvalCard) {
     const local = runLocalDeterministicRouter(input.prompt, sessionId, input.contextAttachment);
+    const budget = getAiBudgetSummary();
     replyText = budget.blocked
       ? `⚠️ Batas anggaran AI bulanan ($${budget.monthlyCapUsd}) tercapai — dialihkan ke mode router lokal.\n\n${local.reply}`
       : local.reply;
     approvalCard = local.approvalCard;
+    providerUsed = 'local';
+    modelLabel = 'llamrei-local-router';
   }
 
   const aiMsgId = `cmsg_${crypto.randomUUID().slice(0, 8)}`;
@@ -596,17 +763,21 @@ export async function handleLlamreiPrompt(input: {
     sessionId,
     replyText,
     approvalCard ? JSON.stringify(approvalCard) : null,
-    usedGemini ? model : 'llamrei-local-router',
+    modelLabel,
   );
 
   const userMessage = db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(userMsgId) as unknown as ChatMessageRow;
   const assistantMessage = db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(aiMsgId) as unknown as ChatMessageRow;
   sseBus.emit('agent:message', assistantMessage);
 
-  return { userMessage, assistantMessage, usedGemini };
+  return { userMessage, assistantMessage, usedGemini, providerUsed };
 }
 
-export async function approveAuditAction(auditId: string, editedArgs?: Record<string, unknown>): Promise<AuditLogRow | null> {
+export async function approveAuditAction(
+  auditId: string,
+  editedArgs?: Record<string, unknown>,
+  fetchImpl?: typeof fetch,
+): Promise<AuditLogRow | null> {
   const db = getDb();
   const audit = db.prepare('SELECT * FROM agent_audit_logs WHERE id = ?').get(auditId) as unknown as AuditLogRow | undefined;
   if (!audit || audit.status !== 'pending_approval') return null;
@@ -652,6 +823,13 @@ export async function approveAuditAction(auditId: string, editedArgs?: Record<st
   } else if (audit.tool_name === 'reply_phone_notification' && args.notifId && args.replyText) {
     await replyPhoneNotification(String(args.notifId), String(args.replyText));
     undoPayload = { kind: 'none' };
+  } else if (audit.tool_name === 'composio_execute_tool' && args.toolSlug) {
+    const execRes = await executeComposioTool(
+      String(args.toolSlug),
+      (args.arguments as Record<string, unknown>) ?? {},
+      fetchImpl,
+    );
+    undoPayload = { kind: 'none', composioOk: execRes.ok, summary: execRes.summary };
   }
 
   db.prepare(
@@ -660,7 +838,6 @@ export async function approveAuditAction(auditId: string, editedArgs?: Record<st
      WHERE id = ?`,
   ).run(JSON.stringify(undoPayload), auditId);
 
-  // Also reflect approval status inside the chat message's approval_card_json
   const msgs = db.prepare('SELECT id, approval_card_json FROM chat_messages WHERE approval_card_json IS NOT NULL').all() as Array<{
     id: string;
     approval_card_json: string;

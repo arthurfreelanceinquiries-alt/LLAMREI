@@ -1,6 +1,92 @@
 export type ThemeId = 'tactical' | 'hybrid' | 'obsidian' | 'bento';
 
-export type NavTab = 'morning' | 'clickup' | 'calendar' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals';
+export type NavTab = 'morning' | 'clickup' | 'calendar' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
+
+export type AiProviderId =
+  | 'auto'
+  | 'opencode_zen'
+  | 'opencode_cli'
+  | 'openrouter'
+  | 'groq'
+  | 'ollama'
+  | 'gemini'
+  | 'local';
+
+export interface AiModelOption {
+  id: string;
+  name: string;
+  provider: Exclude<AiProviderId, 'auto' | 'local'>;
+  isFree: boolean;
+  supportsTools: boolean;
+  contextLimit?: number;
+  note?: string;
+}
+
+export interface AiProviderCatalogSummary {
+  activeProvider: AiProviderId;
+  assistantPersona: 'jarvis' | 'llamrei';
+  opencodeCliAvailable: boolean;
+  providers: Array<{
+    id: Exclude<AiProviderId, 'auto' | 'local'>;
+    label: string;
+    configured: boolean;
+    isFreePrimary: boolean;
+    selectedModel: string;
+    models: AiModelOption[];
+  }>;
+}
+
+export interface ComposioToolkitItem {
+  slug: string;
+  name: string;
+  category: string;
+  description: string;
+  logo?: string | null;
+  authSchemes?: string[];
+  connectedStatus?: string | null;
+  connectedAccountId?: string | null;
+  enabledForAgent?: boolean;
+}
+
+export interface ComposioConnectionItem {
+  id: string;
+  toolkit_slug: string;
+  toolkit_name: string;
+  auth_config_id: string | null;
+  connected_account_id: string | null;
+  status: 'pending' | 'active' | 'expired' | 'disconnected' | 'failed';
+  redirect_url: string | null;
+  account_label: string | null;
+  updated_at: string;
+}
+
+export interface ComposioToolItem {
+  slug: string;
+  name: string;
+  description: string;
+  toolkitSlug: string;
+  readOnly: boolean;
+  inputParameters: Record<string, unknown>;
+}
+
+export interface ComposioToolLogItem {
+  id: string;
+  tool_slug: string;
+  toolkit_slug: string;
+  arguments_json: string;
+  status: 'success' | 'failed' | 'pending_approval';
+  result_summary: string | null;
+  created_at: string;
+}
+
+export interface ComposioState {
+  configured: boolean;
+  userId: string;
+  enabledToolkits: string[];
+  connections: ComposioConnectionItem[];
+  recentLogs: ComposioToolLogItem[];
+  curatedToolkits: ComposioToolkitItem[];
+}
 
 export interface MacroGoal {
   id: string;
@@ -447,6 +533,8 @@ export interface BootstrapPayload {
     blocked: boolean;
     callsCount: number;
   };
+  aiProviders: AiProviderCatalogSummary;
+  composio: ComposioState;
   waTagMentions: WaTagMentionItem[];
   taskTemplates: TaskTemplateItem[];
   appLaunchers: AppLauncherItem[];

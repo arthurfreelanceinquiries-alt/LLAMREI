@@ -15,6 +15,7 @@ interface Props {
   unrepliedWaTagCount: number;
   openTaskCount: number;
   armedAlarmCount: number;
+  connectedAppsCount?: number;
   activeTimer: ActiveTimer | null;
   onStopTimer: (taskId: string) => void;
   onCreateSpace: (name: string) => void;
@@ -35,6 +36,7 @@ export function LeftClickUpSidebar({
   unrepliedWaTagCount,
   openTaskCount,
   armedAlarmCount,
+  connectedAppsCount = 0,
   activeTimer,
   onStopTimer,
   onCreateSpace,
@@ -71,6 +73,7 @@ export function LeftClickUpSidebar({
     { id: 'watags', icon: '💬', label: 'Pusat WhatsApp', badge: unrepliedWaTagCount > 0 ? unrepliedWaTagCount : undefined },
     { id: 'journal', icon: '📊', label: 'Jurnal Trading' },
     { id: 'goals', icon: '🎯', label: 'Goals & Life OS' },
+    { id: 'integrations', icon: '🔌', label: '150+ Apps (Composio)', badge: connectedAppsCount > 0 ? connectedAppsCount : undefined },
     { id: 'phonehub', icon: '📱', label: 'Phone Hub (HP)' },
     { id: 'scheduler', icon: '⏱️', label: 'Pesan Terjadwal', badge: pendingChatCount > 0 ? `${pendingChatCount} Wait` : undefined },
   ];

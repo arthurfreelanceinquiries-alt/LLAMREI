@@ -538,6 +538,7 @@ export async function initBaileysClient(): Promise<void> {
                (id, group_name, sender_display, message_timestamp, quoted_message, matched_alias, ai_intent, ai_urgency, replied_status, content_hash, topic_category, has_event_proposal, proposed_event_title, proposed_event_start, proposed_event_end, proposed_event_location, proposal_status)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unreplied', ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).run(
+              id,
               groupName,
               senderName,
               new Date().toISOString(),

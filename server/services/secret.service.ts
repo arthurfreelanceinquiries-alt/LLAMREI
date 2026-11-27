@@ -6,6 +6,10 @@ import { execFileSync } from 'node:child_process';
 
 export type SecretKeyName =
   | 'GEMINI_API_KEY'
+  | 'OPENCODE_API_KEY'
+  | 'OPENROUTER_API_KEY'
+  | 'GROQ_API_KEY'
+  | 'COMPOSIO_API_KEY'
   | 'NOTION_TOKEN'
   | 'FINNHUB_API_KEY'
   | 'WA_GATEWAY_WEBHOOK_URL'
@@ -109,6 +113,10 @@ export function setSecret(key: SecretKeyName, value: string): { backend: 'libsec
 export function getSecretStatus(): Record<SecretKeyName, { configured: boolean; masked: string | null }> {
   const keys: SecretKeyName[] = [
     'GEMINI_API_KEY',
+    'OPENCODE_API_KEY',
+    'OPENROUTER_API_KEY',
+    'GROQ_API_KEY',
+    'COMPOSIO_API_KEY',
     'NOTION_TOKEN',
     'FINNHUB_API_KEY',
     'WA_GATEWAY_WEBHOOK_URL',
