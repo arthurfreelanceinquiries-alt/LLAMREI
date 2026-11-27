@@ -1,4 +1,4 @@
-export type ThemeId = 'tactical' | 'hybrid' | 'obsidian' | 'bento';
+export type ThemeId = 'tactical' | 'hybrid' | 'obsidian' | 'bento' | 'light';
 
 export type NavTab = 'morning' | 'clickup' | 'calendar' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
 

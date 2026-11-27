@@ -1,9 +1,28 @@
-import { useEffect, useState } from 'react';
+import {
+  CalendarDays,
+  ChartNoAxesCombined,
+  ClipboardList,
+  Clock3,
+  Folder,
+  Layers3,
+  LayoutDashboard,
+  List,
+  MessageSquare,
+  Plug,
+  Plus,
+  Send,
+  Smartphone,
+  SquareArrowOutUpRight,
+  Target,
+  type LucideIcon,
+} from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ActiveTimer, AppLauncherItem, FolderItem, ListItem, NavTab, SpaceItem } from '../../types/llamrei';
 
 interface Props {
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
+  onNavigate?: () => void;
   spaces: SpaceItem[];
   folders: FolderItem[];
   lists: ListItem[];
@@ -22,9 +41,29 @@ interface Props {
   onLaunchApp: (launcherId: string) => void;
 }
 
+interface NavigationItem {
+  id: NavTab;
+  icon: LucideIcon;
+  label: string;
+  count?: number;
+  countLabel?: string;
+}
+
+const sectionTitle = 'px-2 py-1 text-xs font-semibold text-[var(--text-secondary)]';
+const row = 'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-sm transition-colors hover:bg-[var(--bg-elevated)]';
+const selectedRow = 'bg-[var(--accent-soft)] text-[var(--text-primary)]';
+const unselectedRow = 'text-[var(--text-secondary)]';
+
+function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return [hours, minutes, seconds % 60].map((value) => String(value).padStart(2, '0')).join(':');
+}
+
 export function LeftClickUpSidebar({
   activeTab,
   onSelectTab,
+  onNavigate,
   spaces,
   folders,
   lists,
@@ -45,258 +84,259 @@ export function LeftClickUpSidebar({
   const [elapsedSec, setElapsedSec] = useState(0);
   const [newSpaceName, setNewSpaceName] = useState('');
   const [addingSpace, setAddingSpace] = useState(false);
+  const spaceFormId = useId();
+  const spaceNameRef = useRef<HTMLInputElement>(null);
+  const addSpaceRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!activeTimer) {
-      setElapsedSec(0);
-      return;
-    }
+    if (!activeTimer) return;
+    const startedAt = Date.parse(activeTimer.started_at);
     const update = () => {
-      setElapsedSec(Math.max(0, Math.floor((Date.now() - Date.parse(activeTimer.started_at)) / 1000)));
+      setElapsedSec(Number.isFinite(startedAt) ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0);
     };
     update();
     const id = window.setInterval(update, 1000);
     return () => window.clearInterval(id);
   }, [activeTimer]);
 
-  const formatDuration = (sec: number) => {
-    const h = String(Math.floor(sec / 3600)).padStart(2, '0');
-    const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
-    const s = String(sec % 60).padStart(2, '0');
-    return `${h}:${m}:${s}`;
+  useEffect(() => {
+    if (addingSpace) spaceNameRef.current?.focus();
+  }, [addingSpace]);
+
+  const navigate = (tab: NavTab) => {
+    onSelectTab(tab);
+    onNavigate?.();
   };
 
-  const navItems: Array<{ id: NavTab; icon: string; label: string; badge?: string | number }> = [
-    { id: 'morning', icon: '🌅', label: 'Ringkasan Pagi' },
-    { id: 'clickup', icon: '🗂️', label: 'Manajemen Tugas', badge: openTaskCount },
-    { id: 'calendar', icon: '📅', label: 'Kalender & Alarm', badge: armedAlarmCount },
-    { id: 'watags', icon: '💬', label: 'Pusat WhatsApp', badge: unrepliedWaTagCount > 0 ? unrepliedWaTagCount : undefined },
-    { id: 'journal', icon: '📊', label: 'Jurnal Trading' },
-    { id: 'goals', icon: '🎯', label: 'Goals & Life OS' },
-    { id: 'integrations', icon: '🔌', label: '150+ Apps (Composio)', badge: connectedAppsCount > 0 ? connectedAppsCount : undefined },
-    { id: 'phonehub', icon: '📱', label: 'Phone Hub (HP)' },
-    { id: 'scheduler', icon: '⏱️', label: 'Pesan Terjadwal', badge: pendingChatCount > 0 ? `${pendingChatCount} Wait` : undefined },
+  const selectScope = (spaceId: string, listId: string) => {
+    onSelectWorkspaceScope(spaceId, listId);
+    navigate('clickup');
+  };
+
+  const groups: Array<{ title: string; items: NavigationItem[] }> = [
+    {
+      title: 'Ruang kerja',
+      items: [
+        { id: 'morning', icon: LayoutDashboard, label: 'Ringkasan Pagi' },
+        { id: 'clickup', icon: ClipboardList, label: 'Manajemen Tugas', count: openTaskCount, countLabel: 'tugas terbuka' },
+        { id: 'calendar', icon: CalendarDays, label: 'Kalender & Alarm', count: armedAlarmCount, countLabel: 'alarm aktif' },
+      ],
+    },
+    {
+      title: 'Komunikasi',
+      items: [
+        { id: 'watags', icon: MessageSquare, label: 'Pusat WhatsApp', count: unrepliedWaTagCount, countLabel: 'pesan belum dibalas' },
+        { id: 'scheduler', icon: Send, label: 'Pesan Terjadwal', count: pendingChatCount, countLabel: 'pesan menunggu persetujuan' },
+      ],
+    },
+    {
+      title: 'Personal',
+      items: [
+        { id: 'journal', icon: ChartNoAxesCombined, label: 'Jurnal Trading' },
+        { id: 'goals', icon: Target, label: 'Goals & Life OS' },
+      ],
+    },
+    {
+      title: 'Sistem',
+      items: [
+        { id: 'phonehub', icon: Smartphone, label: 'Phone Hub' },
+        { id: 'integrations', icon: Plug, label: 'Integrasi', count: connectedAppsCount, countLabel: 'aplikasi terhubung' },
+      ],
+    },
   ];
+
+  const renderScopeList = (list: ListItem) => {
+    const current = activeTab === 'clickup' && selectedListId === list.id;
+    return (
+      <li key={list.id}>
+        <button
+          type="button"
+          aria-current={current ? 'true' : undefined}
+          className={`${row} ${current ? selectedRow : unselectedRow}`}
+          onClick={() => selectScope(list.space_id, list.id)}
+        >
+          <List aria-hidden="true" className="size-4 shrink-0 opacity-75" strokeWidth={1.75} />
+          <span className="min-w-0 truncate" title={list.name}>{list.name}</span>
+        </button>
+      </li>
+    );
+  };
+
+  const allSpacesCurrent = activeTab === 'clickup' && selectedSpaceId === 'ALL' && selectedListId === 'ALL';
 
   return (
     <aside
-      className="w-full lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r p-2.5 flex flex-col justify-between gap-3"
-      style={{ background: 'var(--bg-panel)', borderColor: 'var(--border-subtle)' }}
+      aria-label="Bilah sisi"
+      className="flex h-full min-h-0 w-full flex-col bg-[var(--bg-panel)] text-[var(--text-primary)]"
     >
-      <div className="space-y-3 overflow-y-auto themed-scroll">
-        {/* Primary Tactical Modes */}
-        <div className="space-y-1">
-          <div className="text-xs font-mono-num uppercase tracking-wider px-1.5" style={{ color: 'var(--text-muted)' }}>
-            Command Modes
-          </div>
-          {navItems.map((item) => {
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => onSelectTab(item.id)}
-                className="w-full text-left px-2.5 py-1.5 rounded text-xs font-medium flex items-center justify-between border transition cursor-pointer"
-                style={
-                  isActive
-                    ? { background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--border-accent)' }
-                    : { background: 'transparent', color: 'var(--text-secondary)', borderColor: 'transparent' }
-                }
-              >
-                <span className="truncate">
-                  {item.icon} {item.label}
-                </span>
-                {item.badge !== undefined && (
-                  <span
-                    className="text-xs font-mono-num px-1.5 py-0.2 rounded"
-                    style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+      <div className="themed-scroll flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain p-3">
+        <nav aria-label="Navigasi utama" className="space-y-3">
+          {groups.map(({ title, items }) => (
+            <div key={title}>
+              <h2 className={sectionTitle}>{title}</h2>
+              <ul>
+                {items.map(({ id, icon: Icon, label, count, countLabel }) => {
+                  const current = activeTab === id;
+                  return (
+                    <li key={id}>
+                      <button
+                        type="button"
+                        aria-current={current ? 'page' : undefined}
+                        onClick={() => navigate(id)}
+                        className={`${row} border ${current ? `${selectedRow} border-[var(--border-accent)] font-semibold` : `${unselectedRow} border-transparent font-medium`}`}
+                      >
+                        <Icon aria-hidden="true" strokeWidth={1.75} className={`size-[18px] shrink-0 ${current ? 'text-[var(--accent)]' : ''}`} />
+                        <span className="min-w-0 flex-1 truncate">{label}</span>
+                        {count !== undefined && count > 0 && (
+                          <span className="font-mono-num shrink-0 rounded-md bg-[var(--bg-elevated)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">
+                            {count}<span className="sr-only"> {countLabel}</span>
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </nav>
 
-        {/* ClickUp Hierarchy Tree */}
-        <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--border-subtle)' }}>
-          <div className="flex items-center justify-between px-1.5">
-            <span className="text-xs font-mono-num uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
-              ClickUp Spaces
-            </span>
+        <nav aria-label="Ruang dan daftar tugas" className="border-t border-[var(--border-subtle)] pt-2">
+          <div className="flex items-center justify-between">
+            <h2 className={sectionTitle}>Space</h2>
             <button
-              onClick={() => setAddingSpace((v) => !v)}
-              className="text-xs font-mono-num cursor-pointer"
-              style={{ color: 'var(--accent)' }}
-              title="Tambah Space baru"
+              ref={addSpaceRef}
+              type="button"
+              aria-expanded={addingSpace}
+              aria-controls={spaceFormId}
+              aria-label="Tambah Space"
+              onClick={() => setAddingSpace(!addingSpace)}
+              className="grid size-11 shrink-0 place-items-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
             >
-              + Space
+              <Plus aria-hidden="true" className="size-[18px]" strokeWidth={1.75} />
             </button>
           </div>
-
-          {addingSpace && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!newSpaceName.trim()) return;
-                onCreateSpace(newSpaceName.trim());
-                setNewSpaceName('');
-                setAddingSpace(false);
-              }}
-              className="flex gap-1 px-1"
-            >
+          <form
+            id={spaceFormId}
+            hidden={!addingSpace}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const name = newSpaceName.trim();
+              if (!name) return;
+              onCreateSpace(name);
+              setNewSpaceName('');
+              setAddingSpace(false);
+              addSpaceRef.current?.focus();
+            }}
+          >
+            <div className="mb-2 flex gap-2">
               <input
+                ref={spaceNameRef}
+                aria-label="Nama Space"
                 value={newSpaceName}
-                onChange={(e) => setNewSpaceName(e.target.value)}
-                placeholder="Nama Space..."
-                className="flex-1 min-w-0 px-2 py-1 rounded text-xs border outline-none"
-                style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
+                onChange={(event) => setNewSpaceName(event.currentTarget.value)}
+                placeholder="Nama Space"
+                className="min-h-11 min-w-0 flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-void)] px-2.5 text-base text-[var(--text-primary)] lg:text-sm"
               />
               <button
                 type="submit"
-                className="px-2 py-1 rounded text-xs font-bold cursor-pointer"
-                style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
+                disabled={!newSpaceName.trim()}
+                className="min-h-11 rounded-lg bg-[var(--accent)] px-2.5 text-sm font-semibold text-[var(--accent-fg)] disabled:opacity-50"
               >
-                OK
-              </button>
-            </form>
-          )}
-
-          <button
-            onClick={() => {
-              onSelectWorkspaceScope('ALL', 'ALL');
-              onSelectTab('clickup');
-            }}
-            className="w-full text-left px-2 py-1 rounded text-xs flex items-center gap-2 cursor-pointer"
-            style={{
-              background: selectedSpaceId === 'ALL' && activeTab === 'clickup' ? 'var(--bg-elevated)' : 'transparent',
-              color: 'var(--text-primary)',
-            }}
-          >
-            <span className="w-2 h-2 rounded-sm" style={{ background: 'var(--accent)' }} />
-            <span>Semua Space</span>
-          </button>
-
-          {spaces.map((sp) => {
-            const spFolders = folders.filter((f) => f.space_id === sp.id);
-            const spLists = lists.filter((l) => l.space_id === sp.id);
-            return (
-              <div key={sp.id} className="space-y-0.5">
-                <button
-                  onClick={() => {
-                    onSelectWorkspaceScope(sp.id, 'ALL');
-                    onSelectTab('clickup');
-                  }}
-                  className="w-full text-left px-2 py-1 rounded text-xs flex items-center gap-2 cursor-pointer"
-                  style={{
-                    background: selectedSpaceId === sp.id && selectedListId === 'ALL' ? 'var(--bg-elevated)' : 'transparent',
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: sp.color }} />
-                  <span className="truncate font-medium">{sp.name}</span>
-                </button>
-                <div className="pl-3 space-y-0.5">
-                  {spFolders.map((f) => {
-                    const fLists = spLists.filter((l) => l.folder_id === f.id);
-                    return (
-                      <div key={f.id} className="space-y-0.5">
-                        <div className="text-xs px-1.5 py-0.5 truncate" style={{ color: 'var(--text-muted)' }}>
-                          📁 {f.name}
-                        </div>
-                        <div className="pl-3 space-y-0.5">
-                          {fLists.map((l) => (
-                            <button
-                              key={l.id}
-                              onClick={() => {
-                                onSelectWorkspaceScope(sp.id, l.id);
-                                onSelectTab('clickup');
-                              }}
-                              className="w-full text-left px-1.5 py-0.5 rounded text-xs truncate cursor-pointer"
-                              style={{
-                                background: selectedListId === l.id ? 'var(--bg-elevated)' : 'transparent',
-                                color: selectedListId === l.id ? 'var(--accent)' : 'var(--text-muted)',
-                              }}
-                            >
-                              └ {l.name}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {spLists
-                    .filter((l) => !l.folder_id)
-                    .map((l) => (
-                      <button
-                        key={l.id}
-                        onClick={() => {
-                          onSelectWorkspaceScope(sp.id, l.id);
-                          onSelectTab('clickup');
-                        }}
-                        className="w-full text-left px-1.5 py-0.5 rounded text-xs truncate cursor-pointer"
-                        style={{
-                          background: selectedListId === l.id ? 'var(--bg-elevated)' : 'transparent',
-                          color: selectedListId === l.id ? 'var(--accent)' : 'var(--text-muted)',
-                        }}
-                      >
-                        └ {l.name}
-                      </button>
-                    ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Safe App Launchers (FR-46) */}
-      <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--border-subtle)' }}>
-        <div className="text-xs font-mono-num uppercase tracking-wider px-1" style={{ color: 'var(--text-muted)' }}>
-          App Launcher
-        </div>
-        <div className="grid grid-cols-2 gap-1">
-          {appLaunchers.map((a) => (
-            <button
-              key={a.id}
-              onClick={() => onLaunchApp(a.id)}
-              title={a.description ?? a.label}
-              className="px-2 py-1 rounded text-xs border text-left truncate cursor-pointer hover:opacity-90"
-              style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
-            >
-              {a.icon} {a.label.split(' ')[0]}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Active Time Tracker & Auto-DND Status */}
-      <div className="themed-card p-2.5 space-y-1">
-        <div className="flex items-center justify-between text-xs font-mono-num" style={{ color: 'var(--text-muted)' }}>
-          <span>⏱ DEEP WORK TIMER</span>
-          {activeTimer && <span style={{ color: 'var(--accent)' }}>HP DND ●</span>}
-        </div>
-        {activeTimer ? (
-          <>
-            <div className="text-xs font-medium truncate">{activeTimer.task_title}</div>
-            <div className="flex items-center justify-between pt-0.5">
-              <span className="text-sm font-mono-num font-bold" style={{ color: 'var(--accent)' }}>
-                {formatDuration(elapsedSec)}
-              </span>
-              <button
-                onClick={() => onStopTimer(activeTimer.task_id)}
-                className="px-2 py-0.5 rounded text-xs font-mono-num bg-rose-500/20 text-rose-400 border border-rose-500/40 cursor-pointer"
-              >
-                STOP
+                Buat
               </button>
             </div>
-          </>
-        ) : (
-          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
-            Klik ▶ Timer di tugas ClickUp (otomatis nyalakan DND HP via NectarLink).
-          </div>
+          </form>
+          <ul>
+            <li>
+              <button
+                type="button"
+                aria-current={allSpacesCurrent ? 'true' : undefined}
+                onClick={() => selectScope('ALL', 'ALL')}
+                className={`${row} ${allSpacesCurrent ? selectedRow : unselectedRow}`}
+              >
+                <Layers3 aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.75} />
+                Semua Space
+              </button>
+            </li>
+            {spaces.map((space) => {
+              const spaceFolders = folders.filter((folder) => folder.space_id === space.id);
+              const spaceLists = lists.filter((list) => list.space_id === space.id);
+              const current = activeTab === 'clickup' && selectedSpaceId === space.id && selectedListId === 'ALL';
+              return (
+                <li key={space.id}>
+                  <button
+                    type="button"
+                    aria-current={current ? 'true' : undefined}
+                    onClick={() => selectScope(space.id, 'ALL')}
+                    className={`${row} ${current ? selectedRow : unselectedRow} font-medium`}
+                  >
+                    <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: space.color }} />
+                    <span className="min-w-0 truncate" title={space.name}>{space.name}</span>
+                  </button>
+                  {(spaceFolders.length > 0 || spaceLists.length > 0) && (
+                    <ul className="ml-3 border-l border-[var(--border-subtle)] pl-1">
+                      {spaceFolders.map((folder) => (
+                        <li key={folder.id}>
+                          <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--text-secondary)]">
+                            <Folder aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.75} />
+                            <span className="min-w-0 truncate" title={folder.name}>{folder.name}</span>
+                          </div>
+                          <ul className="ml-2">{spaceLists.filter((list) => list.folder_id === folder.id).map(renderScopeList)}</ul>
+                        </li>
+                      ))}
+                      {spaceLists.filter((list) => !list.folder_id).map(renderScopeList)}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+
+        {appLaunchers.length > 0 && (
+          <section aria-label="Peluncur aplikasi" className="border-t border-[var(--border-subtle)] pt-3">
+            <h2 className={sectionTitle}>Peluncur aplikasi</h2>
+            <ul>
+              {appLaunchers.map((launcher) => (
+                <li key={launcher.id}>
+                  <button
+                    type="button"
+                    onClick={() => onLaunchApp(launcher.id)}
+                    title={launcher.description ?? launcher.label}
+                    className={`${row} ${unselectedRow}`}
+                  >
+                    <SquareArrowOutUpRight aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.75} />
+                    <span className="min-w-0 truncate">{launcher.label}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
         )}
       </div>
+
+      {activeTimer && (
+        <section aria-label="Timer fokus" className="shrink-0 border-t border-[var(--border-subtle)] p-3">
+          <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3">
+            <h2 className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)]">
+              <Clock3 aria-hidden="true" className="size-4" strokeWidth={1.75} />
+              Timer fokus
+            </h2>
+            <p className="mt-2 truncate text-sm font-medium" title={activeTimer.task_title}>{activeTimer.task_title}</p>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono-num text-base tabular-nums">{formatDuration(elapsedSec)}</span>
+              <button
+                type="button"
+                onClick={() => onStopTimer(activeTimer.task_id)}
+                className="min-h-11 rounded-lg px-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+              >
+                Hentikan
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
     </aside>
   );
 }

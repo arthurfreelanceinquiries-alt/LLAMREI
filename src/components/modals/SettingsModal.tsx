@@ -1,3 +1,5 @@
+import { DialogPanel } from '../ui/DialogPanel';
+import { Control } from '../ui/Control';
 import { useState } from 'react';
 import { THEME_META, useTheme } from '../../theme/ThemeContext';
 import type { AiProviderCatalogSummary, AiProviderId, ThemeId } from '../../types/llamrei';
@@ -100,26 +102,21 @@ export function SettingsModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-2xl rounded-xl border p-5 space-y-4 max-h-[88vh] overflow-y-auto themed-scroll"
-        style={{ background: 'var(--bg-panel)', borderColor: 'var(--border-subtle)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border-subtle)' }}>
-          <h2 className="text-base font-bold">⚙️ Pengaturan Jarvis × Llamrei, Model Gratis & Composio</h2>
-          <button onClick={onClose} className="px-2 py-1 rounded text-xs bg-white/5 cursor-pointer">
-            Tutup
-          </button>
+    <DialogPanel label="Pengaturan" className="workspace-settings-dialog" onClose={onClose}>
+      <div className="space-y-4 p-4 sm:p-5">
+        <div className="flex items-center justify-between gap-2 border-b pb-2" style={{ borderColor: 'var(--border-subtle)' }}>
+          <h2 className="text-lg font-semibold">Pengaturan</h2>
+          <Control onClick={onClose}>Tutup</Control>
         </div>
 
         {/* Theme Switcher */}
         <div className="space-y-1.5">
-          <div className="text-xs font-semibold">Tema Antarmuka (4 Pilihan)</div>
+          <div className="text-xs font-semibold">Tema antarmuka</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {(Object.keys(THEME_META) as ThemeId[]).map((id) => (
               <button
                 key={id}
+                aria-pressed={theme === id}
                 onClick={() => setTheme(id)}
                 className="text-left p-2.5 rounded-lg border text-xs cursor-pointer"
                 style={
@@ -404,6 +401,6 @@ export function SettingsModal({
           </button>
         </div>
       </div>
-    </div>
+    </DialogPanel>
   );
 }

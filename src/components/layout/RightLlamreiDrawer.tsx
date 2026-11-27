@@ -177,7 +177,8 @@ export function RightLlamreiDrawer({
           {onClose && (
             <button
               onClick={onClose}
-              className="p-1 rounded text-xs hover:bg-white/10 transition cursor-pointer text-white/50 hover:text-white"
+              aria-label="Tutup JARVIS"
+              className="ds-control"
               title="Tutup Panel Copilot (⌘J)"
             >
               ✕

@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { CalendarAndAlarmView } from './components/alarms/CalendarAndAlarmView';
 import { HardAlarmOverlayModal } from './components/alarms/HardAlarmOverlayModal';
@@ -16,6 +17,8 @@ import { PhoneHubView, type PhoneCommandFeedback } from './components/phonehub/P
 import { TradingJournalView } from './components/trader/TradingJournalView';
 import { IntegrationsHubView } from './components/integrations/IntegrationsHubView';
 import { FocusedChatModal } from './components/watags/FocusedChatModal';
+import { Control } from './components/ui/Control';
+import { DialogPanel } from './components/ui/DialogPanel';
 import { apiRequest } from './lib/api-client';
 import { ThemeProvider } from './theme/ThemeContext';
 import type {
@@ -25,7 +28,6 @@ import type {
   NavTab,
   PhoneNotificationItem,
   TaskItem,
-  ThemeId,
 } from './types/llamrei';
 
 function DashboardShell() {
@@ -39,34 +41,47 @@ function DashboardShell() {
   const [toast, setToast] = useState<{ text: string; url?: string } | null>(null);
   const [pendingContext, setPendingContext] = useState<Record<string, unknown> | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const [desktopSidebar, setDesktopSidebar] = useState(true);
+  const [isCompact, setIsCompact] = useState(() => !window.matchMedia('(min-width: 1024px)').matches);
+  const [bootstrapError, setBootstrapError] = useState(false);
+
+  useEffect(() => {
+    const query = window.matchMedia('(min-width: 1024px)');
+    const update = () => {
+      setIsCompact(!query.matches);
+      setNavigationOpen(false);
+    };
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusedChatJid, setFocusedChatJid] = useState<string | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(() => {
     return localStorage.getItem('llamrei_copilot_open') === 'true';
   });
 
-  const toggleCopilot = useCallback(() => {
-    setCopilotOpen((v) => {
-      const next = !v;
-      localStorage.setItem('llamrei_copilot_open', String(next));
-      return next;
-    });
-  }, []);
+  const toggleCopilot = useCallback(() => setCopilotOpen((open) => !open), []);
+  useEffect(() => {
+    localStorage.setItem('llamrei_copilot_open', String(copilotOpen));
+  }, [copilotOpen]);
 
   const loadBootstrap = useCallback(async () => {
     const payload = await apiRequest<BootstrapPayload>('/api/bootstrap');
     setData(payload);
+    setBootstrapError(false);
     const activeRing = payload.alarms.find((a) => a.status === 'ringing');
     if (activeRing) setRingingAlarm(activeRing);
   }, []);
 
   useEffect(() => {
-    void loadBootstrap();
+    void loadBootstrap().catch(() => setBootstrapError(true));
   }, [loadBootstrap]);
 
   // Global Keyboard Shortcuts (Cmd+K for Command Palette, Cmd+J for Copilot)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.repeat || e.isComposing) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCmdOpen((v) => !v);
@@ -83,7 +98,7 @@ function DashboardShell() {
   // Real-time SSE listener
   useEffect(() => {
     const es = new EventSource('/api/events');
-    const refresh = () => void loadBootstrap();
+    const refresh = () => void loadBootstrap().catch(() => undefined);
 
     es.addEventListener('alarm:ring', (ev) => {
       const alarm = JSON.parse((ev as MessageEvent).data) as AlarmReminderItem;
@@ -101,8 +116,10 @@ function DashboardShell() {
         text:
           msg.status === 'sent_auto'
             ? `✓ Pesan ke ${msg.recipient_name} berhasil dikirim otomatis`
-            : `💬 Waktunya kirim chat ke ${msg.recipient_name}`,
-        url: msg.waMeUrl,
+            : msg.status === 'reminded_fallback'
+            ? `Waktunya kirim chat ke ${msg.recipient_name}`
+            : `Pengiriman ke ${msg.recipient_name} belum terkonfirmasi`,
+        url: msg.status === 'reminded_fallback' ? msg.waMeUrl : undefined,
       });
       refresh();
     });
@@ -172,8 +189,16 @@ function DashboardShell() {
 
   if (!data) {
     return (
-      <div className="min-h-screen flex items-center justify-center font-mono-num text-sm" style={{ color: 'var(--accent)' }}>
-        ⚡ Memuat Llamrei Personal Command Dashboard...
+      <div className="min-h-screen grid place-content-center gap-3 text-center p-4">
+        {bootstrapError ? (
+          <>
+            <p role="alert">Workspace belum dapat dimuat. Periksa koneksi lalu coba lagi.</p>
+            <Control onClick={() => {
+              setBootstrapError(false);
+              void loadBootstrap().catch(() => setBootstrapError(true));
+            }}>Coba lagi</Control>
+          </>
+        ) : <p role="status">Memuat workspace…</p>}
       </div>
     );
   }
@@ -206,16 +231,72 @@ function DashboardShell() {
     await loadBootstrap();
   };
 
+  const copilot = copilotOpen ? (
+      <RightLlamreiDrawer
+        messages={data.chatMessages}
+        auditLogs={data.auditLogs}
+        aiProviders={data.aiProviders}
+        connectedAppsCount={connectedAppsCount}
+        pendingContext={pendingContext}
+        onClearContext={() => setPendingContext(null)}
+        onSendPrompt={sendPromptToLlamrei}
+        onOpenIntegrations={() => {
+          setActiveTab('integrations');
+          if (isCompact) setCopilotOpen(false);
+        }}
+        onClose={() => setCopilotOpen(false)}
+        onApproveAudit={async (auditId) => {
+          await apiRequest(`/api/agent/audit/${auditId}/approve`, { method: 'POST', body: {} });
+          await loadBootstrap();
+        }}
+        onUndoAudit={async (auditId) => {
+          await apiRequest(`/api/agent/audit/${auditId}/undo`, { method: 'POST', body: {} });
+          await loadBootstrap();
+        }}
+      />
+  ) : null;
+
+  const sidebar = (
+    <LeftClickUpSidebar
+      onNavigate={() => setNavigationOpen(false)}
+      activeTab={activeTab}
+      onSelectTab={setActiveTab}
+      spaces={data.workspace.spaces}
+      folders={data.workspace.folders}
+      lists={data.workspace.lists}
+      appLaunchers={data.appLaunchers}
+      selectedSpaceId={selectedSpaceId}
+      selectedListId={selectedListId}
+      onSelectWorkspaceScope={(sp, ls) => {
+        setSelectedSpaceId(sp);
+        setSelectedListId(ls);
+      }}
+      pendingChatCount={pendingChatCount}
+      unrepliedWaTagCount={unrepliedWaTagCount}
+      openTaskCount={openTaskCount}
+      armedAlarmCount={armedAlarmCount}
+      connectedAppsCount={connectedAppsCount}
+      activeTimer={data.workspace.activeTimer}
+      onStopTimer={(tid) => void apiRequest(`/api/workspace/tasks/${tid}/timer/stop`, { method: 'POST', body: {} }).then(loadBootstrap)}
+      onCreateSpace={(name) => void apiRequest('/api/workspace/spaces', { method: 'POST', body: { name } }).then(loadBootstrap)}
+      onLaunchApp={async (launcherId) => {
+        const res = await apiRequest<{ ok: boolean; note: string }>(`/api/launchers/${launcherId}/open`, { method: 'POST', body: {} });
+        setToast({ text: res.note });
+      }}
+    />
+  );
+
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: 'var(--bg-void)', color: 'var(--text-primary)' }}>
+    <div className="workspace-shell">
+      <a className="skip-to-workspace" href="#workspace-main">Lewati ke konten</a>
       <TopCommandBar
         marketSessions={data.marketSessions.sessions}
         nextAlarm={data.nextAlarm}
         device={data.phoneHub.devices[0] ?? null}
-        network={data.network}
-        aiBudget={data.aiBudget}
         baileysStatus={data.baileys}
         isCopilotOpen={copilotOpen}
+        isNavigationOpen={isCompact ? navigationOpen : desktopSidebar}
+        onToggleNavigation={() => isCompact ? setNavigationOpen((open) => !open) : setDesktopSidebar((open) => !open)}
         onToggleCopilot={toggleCopilot}
         onOpenCommandPalette={() => setCmdOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -224,7 +305,6 @@ function DashboardShell() {
         onOpenFocusedChat={() => {
           setActiveTab('watags');
         }}
-        onTestAlarm={() => void apiRequest('/api/calendar-alarms/alarms/test', { method: 'POST', body: {} })}
       />
 
       {toast && (
@@ -232,7 +312,7 @@ function DashboardShell() {
           className="px-3 py-1.5 text-xs font-mono-num border-b flex items-center justify-between"
           style={{ background: 'var(--accent-soft)', borderColor: 'var(--border-accent)', color: 'var(--accent)' }}
         >
-          <span>{toast.text}</span>
+          <span role="status">{toast.text}</span>
           <div className="flex items-center gap-2">
             {toast.url && (
               <a
@@ -245,44 +325,25 @@ function DashboardShell() {
                 Kirim via wa.me ↗
               </a>
             )}
-            <button onClick={() => setToast(null)} className="cursor-pointer font-bold">
-              ✕
-            </button>
+            <Control aria-label="Tutup notifikasi" onClick={() => setToast(null)}><X aria-hidden="true" /></Control>
           </div>
         </div>
       )}
 
       {/* 3-PANEL HYBRID WORKSPACE */}
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
-        <LeftClickUpSidebar
-          activeTab={activeTab}
-          onSelectTab={setActiveTab}
-          spaces={data.workspace.spaces}
-          folders={data.workspace.folders}
-          lists={data.workspace.lists}
-          appLaunchers={data.appLaunchers}
-          selectedSpaceId={selectedSpaceId}
-          selectedListId={selectedListId}
-          onSelectWorkspaceScope={(sp, ls) => {
-            setSelectedSpaceId(sp);
-            setSelectedListId(ls);
-          }}
-          pendingChatCount={pendingChatCount}
-          unrepliedWaTagCount={unrepliedWaTagCount}
-          openTaskCount={openTaskCount}
-          armedAlarmCount={armedAlarmCount}
-          connectedAppsCount={connectedAppsCount}
-          activeTimer={data.workspace.activeTimer}
-          onStopTimer={(tid) => void apiRequest(`/api/workspace/tasks/${tid}/timer/stop`, { method: 'POST', body: {} }).then(loadBootstrap)}
-          onCreateSpace={(name) => void apiRequest('/api/workspace/spaces', { method: 'POST', body: { name } }).then(loadBootstrap)}
-          onLaunchApp={async (launcherId) => {
-            const res = await apiRequest<{ ok: boolean; note: string }>(`/api/launchers/${launcherId}/open`, { method: 'POST', body: {} });
-            setToast({ text: res.note });
-          }}
-        />
+      <div className="workspace-frame">
+        {isCompact ? navigationOpen && (
+          <DialogPanel label="Navigasi workspace" className="workspace-navigation-dialog" onClose={() => setNavigationOpen(false)}>
+            <div className="workspace-navigation-heading">
+              <strong>Navigasi</strong>
+              <Control aria-label="Tutup navigasi" onClick={() => setNavigationOpen(false)}><X aria-hidden="true" /></Control>
+            </div>
+            {sidebar}
+          </DialogPanel>
+        ) : desktopSidebar && <div className="workspace-sidebar">{sidebar}</div>}
 
         {/* CENTER STAGE */}
-        <main className="flex-1 min-w-0 p-3 lg:p-4 overflow-y-auto themed-scroll">
+        <main id="workspace-main" tabIndex={-1} className="workspace-main themed-scroll">
           {activeTab === 'morning' && (
             <MorningBentoView
               kpis={data.kpis}
@@ -689,27 +750,11 @@ function DashboardShell() {
         </main>
 
         {/* RIGHT JARVIS // LLAMREI CO-COMMANDER DRAWER */}
-        {copilotOpen && (
-          <RightLlamreiDrawer
-            messages={data.chatMessages}
-            auditLogs={data.auditLogs}
-            aiProviders={data.aiProviders}
-            connectedAppsCount={connectedAppsCount}
-            pendingContext={pendingContext}
-            onClearContext={() => setPendingContext(null)}
-            onSendPrompt={sendPromptToLlamrei}
-            onOpenIntegrations={() => setActiveTab('integrations')}
-            onClose={() => setCopilotOpen(false)}
-            onApproveAudit={async (auditId) => {
-              await apiRequest(`/api/agent/audit/${auditId}/approve`, { method: 'POST', body: {} });
-              await loadBootstrap();
-            }}
-            onUndoAudit={async (auditId) => {
-              await apiRequest(`/api/agent/audit/${auditId}/undo`, { method: 'POST', body: {} });
-              await loadBootstrap();
-            }}
-          />
-        )}
+        {copilotOpen && (isCompact ? (
+          <DialogPanel label="JARVIS" className="workspace-copilot-dialog" onClose={() => setCopilotOpen(false)}>
+            {copilot}
+          </DialogPanel>
+        ) : <div className="workspace-copilot">{copilot}</div>)}
       </div>
 
       {/* Drawers & Modals */}
@@ -898,7 +943,7 @@ function DashboardShell() {
 
 export default function App() {
   return (
-    <ThemeProvider initialTheme={'tactical' as ThemeId}>
+    <ThemeProvider>
       <DashboardShell />
     </ThemeProvider>
   );

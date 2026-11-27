@@ -1,3 +1,6 @@
+import { X } from 'lucide-react';
+import { Control } from '../ui/Control';
+import { DialogPanel } from '../ui/DialogPanel';
 import { useState } from 'react';
 import type { ActiveTimer, MacroGoal, ScheduledMessageItem, TaskItem, WorkspaceDocItem } from '../../types/llamrei';
 
@@ -102,19 +105,16 @@ export function TaskDetailDrawer({
   };
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-xs flex justify-end" onClick={onClose}>
-      <div
-        className="w-full max-w-lg h-full border-l p-4 overflow-y-auto themed-scroll space-y-4 shadow-2xl"
-        style={{ background: 'var(--bg-panel)', borderColor: 'var(--border-subtle)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <DialogPanel label="Detail tugas" className="workspace-task-dialog themed-scroll" onClose={onClose}>
+      <div className="space-y-4 p-4">
         {/* Header */}
         <div className="flex items-start justify-between gap-2 border-b pb-3" style={{ borderColor: 'var(--border-subtle)' }}>
           <div className="space-y-1 flex-1">
             <div className="text-xs font-mono-num" style={{ color: 'var(--accent)' }}>
-              TASK DETAIL // CLICKUP + ALARM + CALENDAR (WIB)
+              Detail tugas
             </div>
             <input
+              aria-label="Judul tugas"
               defaultValue={task.title}
               onBlur={(e) => {
                 if (e.target.value.trim() && e.target.value !== task.title) {
@@ -124,9 +124,7 @@ export function TaskDetailDrawer({
               className="w-full text-base font-bold bg-transparent outline-none border-b border-transparent focus:border-white/20"
             />
           </div>
-          <button onClick={onClose} className="px-2 py-1 rounded text-xs bg-white/5 cursor-pointer">
-            ✕
-          </button>
+          <Control onClick={onClose} aria-label="Tutup detail tugas"><X aria-hidden="true" /></Control>
         </div>
 
         {/* Quick Actions */}
@@ -518,6 +516,6 @@ export function TaskDetailDrawer({
           </button>
         </div>
       </div>
-    </div>
+    </DialogPanel>
   );
 }

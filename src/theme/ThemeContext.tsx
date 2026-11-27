@@ -13,9 +13,14 @@ export const THEME_META: Record<ThemeId, { label: string; short: string; tagline
     tagline: 'Obsidian #090A0F · Glass Bento · Indigo-Cyan',
   },
   obsidian: {
-    label: 'Opsi A: Obsidian Precision',
+    label: 'Obsidian Intelligence',
     short: 'Obsidian',
-    tagline: 'Linear × Raycast × ClickUp Dark · Hairline Borders',
+    tagline: 'Tema gelap dengan aksen indigo',
+  },
+  light: {
+    label: 'Cahaya',
+    short: 'Cahaya',
+    tagline: 'Tema terang dengan aksen indigo',
   },
   bento: {
     label: 'Opsi B: Midnight Bento Cockpit',
@@ -29,12 +34,12 @@ interface ThemeCtx {
   setTheme: (id: ThemeId) => void;
 }
 
-const ThemeContext = createContext<ThemeCtx>({ theme: 'tactical', setTheme: () => {} });
+const ThemeContext = createContext<ThemeCtx>({ theme: 'obsidian', setTheme: () => {} });
 
-export function ThemeProvider({ initialTheme = 'tactical', children }: { initialTheme?: ThemeId; children: React.ReactNode }) {
+export function ThemeProvider({ initialTheme = 'obsidian', children }: { initialTheme?: ThemeId; children: React.ReactNode }) {
   const [theme, setThemeState] = useState<ThemeId>(() => {
     const saved = localStorage.getItem('llamrei_theme') as ThemeId | null;
-    return saved && saved in THEME_META ? saved : initialTheme;
+    return saved && Object.hasOwn(THEME_META, saved) ? saved : initialTheme;
   });
 
   useEffect(() => {

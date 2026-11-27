@@ -1,4 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  Bell,
+  CornerDownLeft,
+  MessageSquare,
+  Newspaper,
+  Search,
+  Sparkles,
+  SquareCheck,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
 import type { AlarmReminderItem, ContactItem, NavTab, NewsArticleItem, TaskItem } from '../../types/llamrei';
 
 interface Props {
@@ -13,6 +26,27 @@ interface Props {
   onAskLlamrei: (prompt: string) => void;
 }
 
+interface Result {
+  key: string;
+  title: string;
+  detail?: string;
+  select: () => void;
+}
+
+interface ResultGroup {
+  title: string;
+  icon: LucideIcon;
+  items: Result[];
+}
+
+const alarmStatus: Record<AlarmReminderItem['status'], string> = {
+  armed: 'Siap',
+  ringing: 'Berdering',
+  snoozed: 'Ditunda',
+  dismissed: 'Dihentikan',
+  completed: 'Selesai',
+};
+
 export function CommandPaletteModal({
   open,
   onClose,
@@ -24,151 +58,219 @@ export function CommandPaletteModal({
   onSelectTask,
   onAskLlamrei,
 }: Props) {
+  const id = useId();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
+  const [activeKey, setActiveKey] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open) setQuery('');
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+    if (!open || !dialog) {
+      setQuery('');
+      setActiveKey(null);
+      return;
+    }
+    const trigger = document.activeElement;
+    dialog.showModal();
+    inputRef.current?.focus();
+    return () => {
+      dialog.close();
+      if (document.activeElement === document.body && trigger instanceof HTMLElement && trigger.isConnected) {
+        trigger.focus({ preventScroll: true });
+      }
+    };
   }, [open]);
 
-  if (!open) return null;
+  const prompt = query.trim();
+  const q = prompt.toLowerCase();
+  const matches = (text: string) => text.toLowerCase().includes(q);
+  const groups: ResultGroup[] = [
+    {
+      title: 'Tugas',
+      icon: SquareCheck,
+      items: tasks.filter((task) => matches(task.title)).slice(0, 5).map((task) => ({
+        key: `task-${task.id}`,
+        title: task.title,
+        detail: task.status,
+        select: () => {
+          onSelectTask(task);
+          onNavigateTab('clickup');
+        },
+      })),
+    },
+    {
+      title: 'Alarm dan pengingat',
+      icon: Bell,
+      items: alarms.filter((alarm) => matches(alarm.title)).slice(0, 3).map((alarm) => ({
+        key: `alarm-${alarm.id}`,
+        title: alarm.title,
+        detail: alarm.enabled ? alarmStatus[alarm.status] : 'Nonaktif',
+        select: () => onNavigateTab('calendar'),
+      })),
+    },
+    {
+      title: 'Kontak',
+      icon: MessageSquare,
+      items: contacts.filter((contact) => matches(contact.name)).slice(0, 3).map((contact) => ({
+        key: `contact-${contact.id}`,
+        title: `Jadwalkan chat ke ${contact.name}`,
+        detail: contact.phone_e164 ?? undefined,
+        select: () => onAskLlamrei(`Jadwalkan chat ke ${contact.name} jam 19:00 soal `),
+      })),
+    },
+    {
+      title: 'Berita',
+      icon: Newspaper,
+      items: news.filter((article) => matches(article.title)).slice(0, 3).map((article) => ({
+        key: `news-${article.id}`,
+        title: article.title,
+        select: () => onAskLlamrei(`Ringkas berita ini: ${article.title}`),
+      })),
+    },
+  ];
 
-  const q = query.trim().toLowerCase();
-  const matchedTasks = tasks.filter((t) => t.title.toLowerCase().includes(q)).slice(0, 5);
-  const matchedAlarms = alarms.filter((a) => a.title.toLowerCase().includes(q)).slice(0, 3);
-  const matchedContacts = contacts.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 3);
-  const matchedNews = news.filter((n) => n.title.toLowerCase().includes(q)).slice(0, 3);
+  const matchCount = groups.reduce((total, group) => total + group.items.length, 0);
+  if (prompt) {
+    groups.push({
+      title: 'Asisten',
+      icon: Sparkles,
+      items: [{ key: 'ask', title: `Tanya Llamrei: ${prompt}`, select: () => onAskLlamrei(prompt) }],
+    });
+  }
+
+  const options = groups.flatMap((group) => group.items);
+  const listId = `${id}-results`;
+  const optionId = (index: number) => `${listId}-${index}`;
+  const activeIndex = Math.max(0, options.findIndex((option) => option.key === activeKey));
+  const activeOption = options[activeIndex];
+
+  function select(result: Result) {
+    result.select();
+    onClose();
+  }
+
+  function handleSearchKey(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.nativeEvent.isComposing || !options.length) return;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      select(activeOption);
+      return;
+    }
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowUp' ? -1 : 1;
+    const next = (activeIndex + delta + options.length) % options.length;
+    setActiveKey(options[next].key);
+    document.getElementById(optionId(next))?.scrollIntoView({ block: 'nearest' });
+  }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-start justify-center pt-20 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-xl rounded-xl border shadow-2xl overflow-hidden"
-        style={{ background: 'var(--bg-panel)', borderColor: 'var(--border-accent)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="p-3 border-b flex items-center gap-2" style={{ borderColor: 'var(--border-subtle)' }}>
-          <span className="font-mono-num text-xs" style={{ color: 'var(--accent)' }}>
-            ⌘K
-          </span>
+    <dialog
+      ref={dialogRef}
+      aria-labelledby={`${id}-label`}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Tab') return;
+        if (event.shiftKey && event.target === inputRef.current) {
+          event.preventDefault();
+          closeRef.current?.focus();
+        } else if (!event.shiftKey && event.target === closeRef.current) {
+          event.preventDefault();
+          inputRef.current?.focus();
+        }
+      }}
+      className="fixed top-4 right-auto bottom-auto left-1/2 m-0 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/70 sm:top-[12vh] sm:max-h-[calc(88dvh-1rem)]"
+    >
+      <div className="flex max-h-[inherit] flex-col">
+        <div className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2">
+          <Search size={20} aria-hidden="true" className="shrink-0 text-[var(--text-secondary)]" />
+          <h2 id={`${id}-label`} className="sr-only">Palet perintah</h2>
+          <label htmlFor={`${id}-query`} className="sr-only">Cari atau tanyakan ke Llamrei</label>
           <input
-            autoFocus
+            id={`${id}-query`}
+            ref={inputRef}
+            type="text"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={open && !!activeOption}
+            aria-controls={activeOption ? listId : undefined}
+            aria-activedescendant={activeOption ? optionId(activeIndex) : undefined}
+            aria-describedby={`${id}-keys`}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Cari tugas ClickUp, alarm, kontak, berita, atau ketik perintah ke Llamrei..."
-            className="flex-1 bg-transparent text-sm outline-none"
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActiveKey(null);
+              if (resultsRef.current) resultsRef.current.scrollTop = 0;
+            }}
+            onKeyDown={handleSearchKey}
+            placeholder="Cari tugas, alarm, kontak, berita…"
+            className="min-h-11 min-w-0 flex-1 rounded-md bg-transparent px-2 text-base placeholder:text-[var(--text-secondary)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--accent)]"
           />
-          <button onClick={onClose} className="text-xs px-2 py-0.5 rounded bg-white/5 cursor-pointer">
-            ESC
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Tutup palet perintah"
+            title="Tutup (Esc)"
+            className="grid size-11 shrink-0 place-items-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+          >
+            <X size={18} aria-hidden="true" />
           </button>
         </div>
 
-        <div className="max-h-96 overflow-y-auto themed-scroll p-2 space-y-2 text-xs">
-          {query.trim() && (
-            <button
-              onClick={() => {
-                onAskLlamrei(query.trim());
-                onClose();
-              }}
-              className="w-full text-left p-2 rounded-lg border flex items-center justify-between cursor-pointer"
-              style={{ background: 'var(--accent-soft)', borderColor: 'var(--border-accent)', color: 'var(--accent)' }}
-            >
-              <span>🤖 Jalankan perintah di Llamrei: "{query.trim()}"</span>
-              <span className="font-mono-num">ENTER ↵</span>
-            </button>
-          )}
-
-          {matchedTasks.length > 0 && (
-            <div className="space-y-1">
-              <div className="px-2 font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                TUGAS CLICKUP
-              </div>
-              {matchedTasks.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => {
-                    onSelectTask(t);
-                    onNavigateTab('clickup');
-                    onClose();
-                  }}
-                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-white/5 flex items-center justify-between cursor-pointer"
-                >
-                  <span className="truncate">{t.title}</span>
-                  <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                    {t.status}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {matchedAlarms.length > 0 && (
-            <div className="space-y-1">
-              <div className="px-2 font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                ALARM & REMINDER
-              </div>
-              {matchedAlarms.map((a) => (
-                <button
-                  key={a.id}
-                  onClick={() => {
-                    onNavigateTab('calendar');
-                    onClose();
-                  }}
-                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-white/5 flex items-center justify-between cursor-pointer"
-                >
-                  <span>
-                    {a.kind === 'hard_alarm' ? '⏰' : '🔔'} {a.title}
-                  </span>
-                  <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                    {a.status}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {matchedContacts.length > 0 && (
-            <div className="space-y-1">
-              <div className="px-2 font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                KONTAK CHAT
-              </div>
-              {matchedContacts.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => {
-                    onAskLlamrei(`Jadwalkan chat ke ${c.name} jam 19:00 soal `);
-                    onClose();
-                  }}
-                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-white/5 flex items-center justify-between cursor-pointer"
-                >
-                  <span>💬 Jadwalkan chat ke {c.name}</span>
-                  <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                    {c.phone_e164}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {matchedNews.length > 0 && (
-            <div className="space-y-1">
-              <div className="px-2 font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                BERITA PASAR & AI
-              </div>
-              {matchedNews.map((n) => (
-                <button
-                  key={n.id}
-                  onClick={() => {
-                    onAskLlamrei(`Ringkas berita ini: ${n.title}`);
-                    onClose();
-                  }}
-                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-white/5 truncate cursor-pointer"
-                >
-                  📰 {n.title}
-                </button>
+        <div ref={resultsRef} className="themed-scroll min-h-0 max-h-96 overflow-y-auto overscroll-contain p-2">
+          <p role="status" className={matchCount ? 'sr-only' : 'px-3 py-4 text-sm text-[var(--text-secondary)]'}>
+            {matchCount ? `${matchCount} hasil pencarian` : prompt ? 'Tidak ada hasil pencarian.' : 'Ketik untuk mencari atau bertanya ke Llamrei.'}
+          </p>
+          {!!options.length && (
+            <div role="listbox" id={listId} aria-label="Hasil dan tindakan" className="space-y-2">
+              {groups.filter((group) => group.items.length).map(({ title, icon: Icon, items }, index) => (
+                <div key={title} role="group" aria-labelledby={`${listId}-group-${index}`}>
+                  <div id={`${listId}-group-${index}`} className="px-3 pb-1 pt-2 text-xs font-medium text-[var(--text-secondary)]">
+                    {title}
+                  </div>
+                  {items.map((item) => (
+                    <div
+                      key={item.key}
+                      id={optionId(options.indexOf(item))}
+                      role="option"
+                      aria-selected={item === activeOption}
+                      onMouseMove={() => setActiveKey(item.key)}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => select(item)}
+                      className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md border border-transparent px-3 py-2 text-sm aria-selected:border-[var(--border-accent)] aria-selected:bg-[var(--accent-soft)]"
+                    >
+                      <Icon size={16} aria-hidden="true" className="shrink-0 text-[var(--text-secondary)]" />
+                      <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                      {item.detail && (
+                        <span className="max-w-[35%] shrink-0 truncate text-xs text-[var(--text-secondary)]">{item.detail}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
               ))}
             </div>
           )}
         </div>
+
+        <div id={`${id}-keys`} className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--border-subtle)] px-4 py-2.5 text-xs text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-1">
+            <ArrowUp size={13} aria-hidden="true" />
+            <ArrowDown size={13} aria-hidden="true" />
+            <span aria-hidden="true">Navigasi</span>
+            <span className="sr-only">Gunakan panah atas atau bawah untuk navigasi</span>
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <CornerDownLeft size={13} aria-hidden="true" />
+            Enter untuk memilih
+          </span>
+          <span className="ml-auto"><kbd>Esc</kbd> untuk menutup</span>
+        </div>
       </div>
-    </div>
+    </dialog>
   );
 }
