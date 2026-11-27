@@ -163,6 +163,8 @@ export interface CalendarEventItem {
   title: string;
   start_at: string;
   end_at: string | null;
+  all_day?: number;
+  location?: string | null;
   color: string;
   has_hard_alarm: number;
   notes: string | null;

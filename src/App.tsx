@@ -1,12 +1,12 @@
 import { X } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
-import { CalendarAndAlarmView } from './components/alarms/CalendarAndAlarmView';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CalendarAndAlarmView, type CalendarTarget } from './components/alarms/CalendarAndAlarmView';
 import { HardAlarmOverlayModal } from './components/alarms/HardAlarmOverlayModal';
 import { ClickUpWorkspaceView } from './components/clickup/ClickUpWorkspaceView';
 import { TaskDetailDrawer } from './components/clickup/TaskDetailDrawer';
 import { GoalsAndLifeOsView } from './components/goals/GoalsAndLifeOsView';
 import { LeftClickUpSidebar } from './components/layout/LeftClickUpSidebar';
-import { RightLlamreiDrawer } from './components/layout/RightLlamreiDrawer';
+import { RightLlamreiDrawer, type CopilotDraft } from './components/layout/RightLlamreiDrawer';
 import { TopCommandBar } from './components/layout/TopCommandBar';
 import { ScheduledChatCenter } from './components/messaging/ScheduledChatCenter';
 import { WaTagInboxView } from './components/messaging/WaTagInboxView';
@@ -19,12 +19,15 @@ import { IntegrationsHubView } from './components/integrations/IntegrationsHubVi
 import { FocusedChatModal } from './components/watags/FocusedChatModal';
 import { Control } from './components/ui/Control';
 import { DialogPanel } from './components/ui/DialogPanel';
+import { isActiveAlarm } from './lib/alarm-state';
+import { listTaskStatuses } from './lib/task-status';
 import { apiRequest } from './lib/api-client';
 import { ThemeProvider } from './theme/ThemeContext';
 import type {
   AiProviderId,
   AlarmReminderItem,
   BootstrapPayload,
+  ChatMessageItem,
   NavTab,
   PhoneNotificationItem,
   TaskItem,
@@ -33,9 +36,15 @@ import type {
 function DashboardShell() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>('morning');
+  const [calendarTarget, setCalendarTarget] = useState<(CalendarTarget & { request: number }) | null>(null);
+  const bootstrapRequest = useRef(0);
+  const appliedBootstrap = useRef(0);
   const [selectedSpaceId, setSelectedSpaceId] = useState<string | 'ALL'>('ALL');
   const [selectedListId, setSelectedListId] = useState<string | 'ALL'>('ALL');
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [openDocumentId, setOpenDocumentId] = useState<string | null>(null);
+  const [copilotDraft, setCopilotDraft] = useState<CopilotDraft | null>(null);
+  const clearCopilotDraft = useCallback(() => setCopilotDraft(null), []);
   const [watchlistSymbol, setWatchlistSymbol] = useState('OANDA:XAUUSD');
   const [ringingAlarm, setRingingAlarm] = useState<AlarmReminderItem | null>(null);
   const [toast, setToast] = useState<{ text: string; url?: string } | null>(null);
@@ -45,6 +54,7 @@ function DashboardShell() {
   const [desktopSidebar, setDesktopSidebar] = useState(true);
   const [isCompact, setIsCompact] = useState(() => !window.matchMedia('(min-width: 1024px)').matches);
   const [bootstrapError, setBootstrapError] = useState(false);
+  const [liveUpdates, setLiveUpdates] = useState(true);
 
   useEffect(() => {
     const query = window.matchMedia('(min-width: 1024px)');
@@ -67,11 +77,13 @@ function DashboardShell() {
   }, [copilotOpen]);
 
   const loadBootstrap = useCallback(async () => {
+    const request = ++bootstrapRequest.current;
     const payload = await apiRequest<BootstrapPayload>('/api/bootstrap');
+    if (request < appliedBootstrap.current) return;
+    appliedBootstrap.current = request;
     setData(payload);
     setBootstrapError(false);
-    const activeRing = payload.alarms.find((a) => a.status === 'ringing');
-    if (activeRing) setRingingAlarm(activeRing);
+    setRingingAlarm(payload.alarms.find((alarm) => alarm.enabled === 1 && alarm.status === 'ringing') ?? null);
   }, []);
 
   useEffect(() => {
@@ -81,7 +93,7 @@ function DashboardShell() {
   // Global Keyboard Shortcuts (Cmd+K for Command Palette, Cmd+J for Copilot)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || e.isComposing) return;
+      if (e.defaultPrevented || e.repeat || e.isComposing || ringingAlarm?.id) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCmdOpen((v) => !v);
@@ -93,12 +105,22 @@ function DashboardShell() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [toggleCopilot]);
+  }, [toggleCopilot, ringingAlarm?.id]);
 
   // Real-time SSE listener
   useEffect(() => {
     const es = new EventSource('/api/events');
     const refresh = () => void loadBootstrap().catch(() => undefined);
+    let disconnected = false;
+    es.addEventListener('error', () => {
+      disconnected = true;
+      setLiveUpdates(false);
+    });
+    es.addEventListener('open', () => {
+      setLiveUpdates(true);
+      if (disconnected) refresh();
+      disconnected = false;
+    });
 
     es.addEventListener('alarm:ring', (ev) => {
       const alarm = JSON.parse((ev as MessageEvent).data) as AlarmReminderItem;
@@ -203,15 +225,34 @@ function DashboardShell() {
     );
   }
 
+  const openDocument = data.workspaceDocs.find(({ id }) => id === openDocumentId);
   const openTask = data.workspace.tasks.find((t) => t.id === openTaskId) ?? null;
   const openTaskSubs = openTask ? data.workspace.tasks.filter((t) => t.parent_task_id === openTask.id) : [];
   const openTaskChats = openTask ? data.scheduledMessages.filter((m) => m.linked_task_id === openTask.id) : [];
   const openTaskDocs = openTask ? data.workspaceDocs.filter((d) => d.linked_task_id === openTask.id) : [];
   const openTaskCount = data.workspace.tasks.filter((t) => !t.parent_task_id && t.status !== 'Done').length;
-  const armedAlarmCount = data.alarms.filter((a) => a.enabled === 1 && a.kind === 'hard_alarm').length;
+  const armedAlarmCount = data.alarms.filter((alarm) => alarm.kind === 'hard_alarm' && isActiveAlarm(alarm)).length;
   const pendingChatCount = data.scheduledMessages.filter((m) => m.status === 'pending_approval').length;
   const unrepliedWaTagCount = data.waTagMentions.filter((m) => m.replied_status === 'unreplied').length;
   const connectedAppsCount = data.composio?.connections.filter((c) => c.status === 'active').length ?? 0;
+
+  const navigateTab = (tab: NavTab) => {
+    setCalendarTarget(null);
+    setActiveTab(tab);
+  };
+
+  const openCalendarTarget = (target: CalendarTarget) => {
+    setCalendarTarget((current) => ({ ...target, request: (current?.request ?? 0) + 1 }));
+    setActiveTab('calendar');
+  };
+
+  const refreshAfterMutation = async () => {
+    try {
+      await loadBootstrap();
+    } catch {
+      setToast({ text: 'Perubahan diterima. Muat ulang untuk melihat keadaan terbaru.' });
+    }
+  };
 
   const sendPromptToLlamrei = async (
     prompt: string,
@@ -219,7 +260,7 @@ function DashboardShell() {
     aiOverride?: { providerOverride?: AiProviderId; modelOverride?: string },
   ) => {
     setCopilotOpen(true);
-    await apiRequest('/api/agent/prompt', {
+    const result = await apiRequest<{ userMessage: ChatMessageItem; assistantMessage: ChatMessageItem }>('/api/agent/prompt', {
       method: 'POST',
       body: {
         prompt,
@@ -228,7 +269,19 @@ function DashboardShell() {
         modelOverride: aiOverride?.modelOverride,
       },
     });
-    await loadBootstrap();
+    setData((current) => {
+      if (!current) return current;
+      const received = [result.userMessage, result.assistantMessage]
+        .filter((message) => message && !current.chatMessages.some(({ id }) => id === message.id));
+      return received.length ? { ...current, chatMessages: [...current.chatMessages, ...received] } : current;
+    });
+    void refreshAfterMutation();
+  };
+
+  const prepareCopilotDraft = (prompt: string, context?: Record<string, unknown>) => {
+    setPendingContext(context ?? null);
+    setCopilotDraft({ prompt });
+    setCopilotOpen(true);
   };
 
   const copilot = copilotOpen ? (
@@ -237,6 +290,9 @@ function DashboardShell() {
         auditLogs={data.auditLogs}
         aiProviders={data.aiProviders}
         connectedAppsCount={connectedAppsCount}
+        allowCloudContext={data.settings.ai_allow_cloud_chat_context === true}
+        draft={copilotDraft}
+        onDraftLoaded={clearCopilotDraft}
         pendingContext={pendingContext}
         onClearContext={() => setPendingContext(null)}
         onSendPrompt={sendPromptToLlamrei}
@@ -260,7 +316,7 @@ function DashboardShell() {
     <LeftClickUpSidebar
       onNavigate={() => setNavigationOpen(false)}
       activeTab={activeTab}
-      onSelectTab={setActiveTab}
+      onSelectTab={navigateTab}
       spaces={data.workspace.spaces}
       folders={data.workspace.folders}
       lists={data.workspace.lists}
@@ -300,7 +356,9 @@ function DashboardShell() {
         onToggleCopilot={toggleCopilot}
         onOpenCommandPalette={() => setCmdOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
-        onOpenAlarms={() => setActiveTab('calendar')}
+        onOpenAlarms={() => data.nextAlarm
+          ? openCalendarTarget({ kind: 'alarm', id: data.nextAlarm.id })
+          : navigateTab('calendar')}
         onOpenPhoneHub={() => setActiveTab('phonehub')}
         onOpenFocusedChat={() => {
           setActiveTab('watags');
@@ -330,6 +388,13 @@ function DashboardShell() {
         </div>
       )}
 
+      {!liveUpdates && (
+        <div className="flex flex-wrap items-center justify-between gap-1 border-b border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-1">
+          <span role="status" className="text-sm text-[var(--text-secondary)]">Pembaruan otomatis terputus.</span>
+          <Control onClick={() => void loadBootstrap().catch(() => setToast({ text: 'Data belum dapat dimuat ulang.' }))}>Muat ulang data</Control>
+        </div>
+      )}
+
       {/* 3-PANEL HYBRID WORKSPACE */}
       <div className="workspace-frame">
         {isCompact ? navigationOpen && (
@@ -354,6 +419,9 @@ function DashboardShell() {
               news={data.marketFeed.news}
               economicEvents={data.marketFeed.economicEvents}
               watchlistSymbol={watchlistSymbol}
+              pendingApprovalCount={data.auditLogs.filter(({ status }) => status === 'pending_approval').length}
+              onOpenCalendarTarget={openCalendarTarget}
+              onOpenCopilot={() => setCopilotOpen(true)}
               onSelectWatchlistSymbol={setWatchlistSymbol}
               onSaveCheckIn={async (input) => {
                 await apiRequest('/api/lifeos/checkin', { method: 'POST', body: input });
@@ -364,18 +432,17 @@ function DashboardShell() {
                 await loadBootstrap();
               }}
               onCycleTaskStatus={async (task) => {
-                const order = ['To Do', 'In Progress', 'Review', 'Done'];
+                const order = listTaskStatuses(data.workspace.lists.find(({ id }) => id === task.list_id), task.status);
                 const next = order[(order.indexOf(task.status) + 1) % order.length];
                 await apiRequest(`/api/workspace/tasks/${task.id}`, { method: 'PATCH', body: { status: next } });
                 await loadBootstrap();
               }}
               onOpenTask={(t) => setOpenTaskId(t.id)}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
               onAskLlamreiWithContext={(prompt, ctx) => {
-                setPendingContext(ctx);
-                void sendPromptToLlamrei(prompt, ctx);
+                prepareCopilotDraft(prompt, ctx);
               }}
-              onAutoSchedule={() => setActiveTab('goals')}
+              onAutoSchedule={() => navigateTab('goals')}
               onRefreshMarket={async () => {
                 await apiRequest('/api/market/refresh', { method: 'POST', body: {} });
                 await loadBootstrap();
@@ -388,7 +455,7 @@ function DashboardShell() {
               spaces={data.workspace.spaces}
               lists={data.workspace.lists}
               tasks={data.workspace.tasks}
-              goals={data.workspace.goals}
+              folders={data.workspace.folders}
               templates={data.taskTemplates}
               ganttWorkload={data.ganttWorkload}
               selectedSpaceId={selectedSpaceId}
@@ -396,77 +463,82 @@ function DashboardShell() {
               activeTimer={data.workspace.activeTimer}
               onCreateList={async (spaceId, name) => {
                 await apiRequest('/api/workspace/lists', { method: 'POST', body: { spaceId, name } });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onApplyTemplate={async (templateId, listId) => {
                 await apiRequest('/api/workspace/templates/apply', { method: 'POST', body: { templateId, listId } });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onImportTasks={async (listId, format, content) => {
                 const res = await apiRequest<{ importedCount: number }>('/api/workspace/import', {
                   method: 'POST',
                   body: { listId, format, content },
                 });
-                await loadBootstrap();
+                await refreshAfterMutation();
                 return res;
               }}
               onCreateTask={async (input) => {
                 await apiRequest('/api/workspace/tasks', { method: 'POST', body: input });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onUpdateTask={async (taskId, patch) => {
                 await apiRequest(`/api/workspace/tasks/${taskId}`, { method: 'PATCH', body: patch });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onOpenTask={(t) => setOpenTaskId(t.id)}
               onStartTimer={async (tid) => {
                 await apiRequest(`/api/workspace/tasks/${tid}/timer/start`, { method: 'POST', body: {} });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onStopTimer={async (tid) => {
                 await apiRequest(`/api/workspace/tasks/${tid}/timer/stop`, { method: 'POST', body: {} });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
             />
           )}
 
           {activeTab === 'calendar' && (
             <CalendarAndAlarmView
+              key={calendarTarget?.request ?? 0}
+              target={calendarTarget ?? undefined}
+              onOpenTask={setOpenTaskId}
               calendarEvents={data.calendarEvents}
               alarms={data.alarms}
               tasks={data.workspace.tasks}
               onCreateCalendarEvent={async (input) => {
                 await apiRequest('/api/calendar-alarms/events', { method: 'POST', body: input });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onMoveCalendarEvent={async (eventId, startAt) => {
                 await apiRequest(`/api/calendar-alarms/events/${eventId}/move`, { method: 'PATCH', body: { startAt } });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onCreateAlarm={async (input) => {
                 await apiRequest('/api/calendar-alarms/alarms', { method: 'POST', body: input });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onToggleAlarm={async (id, enabled) => {
                 await apiRequest(`/api/calendar-alarms/alarms/${id}/toggle`, { method: 'PATCH', body: { enabled } });
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
-              onTestAlarm={async (alarmId) => {
-                await apiRequest('/api/calendar-alarms/alarms/test', { method: 'POST', body: { alarmId } });
+              onRingAlarm={async (alarmId) => {
+                const alarm = await apiRequest<AlarmReminderItem>('/api/calendar-alarms/alarms/test', { method: 'POST', body: { alarmId } });
+                setRingingAlarm(alarm);
+                void refreshAfterMutation();
               }}
               onSnoozeAlarm={async (id, minutes) => {
                 await apiRequest(`/api/calendar-alarms/alarms/${id}/snooze`, { method: 'POST', body: { minutes } });
                 setRingingAlarm(null);
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onDismissAlarm={async (id) => {
                 await apiRequest(`/api/calendar-alarms/alarms/${id}/dismiss`, { method: 'POST', body: {} });
                 setRingingAlarm(null);
-                await loadBootstrap();
+                await refreshAfterMutation();
               }}
               onSyncNotion={async () => {
                 const res = await apiRequest<{ note: string }>('/api/market/notion-sync', { method: 'POST', body: {} });
-                await loadBootstrap();
+                await refreshAfterMutation();
                 return res;
               }}
             />
@@ -687,7 +759,7 @@ function DashboardShell() {
                 await loadBootstrap();
               }}
               onScheduleReplyForMention={(m) => {
-                void sendPromptToLlamrei(
+                prepareCopilotDraft(
                   `Jadwalkan chat ke ${m.sender_display} jam 19:00 soal menanggapi pesan di grup ${m.group_name}`,
                   m as unknown as Record<string, unknown>,
                 );
@@ -713,7 +785,7 @@ function DashboardShell() {
                 await apiRequest(`/api/journal/${id}`, { method: 'DELETE' });
                 await loadBootstrap();
               }}
-              onAskLlamreiPattern={(summaryPrompt) => void sendPromptToLlamrei(summaryPrompt)}
+              onAskLlamreiPattern={prepareCopilotDraft}
             />
           )}
 
@@ -725,12 +797,12 @@ function DashboardShell() {
                 await apiRequest('/api/workspace/goals', { method: 'POST', body: input });
                 await loadBootstrap();
               }}
-              onComputeAutoSchedule={async (apply) => {
+              onComputeAutoSchedule={async (apply, expected) => {
                 const res = await apiRequest<{
                   proposals: Array<{ taskId: string; title: string; priority: string; blockStart: string; blockEnd: string; reason: string }>;
                   blockedWindows: Array<{ label: string }>;
-                }>('/api/lifeos/auto-schedule', { method: 'POST', body: { apply } });
-                if (apply) await loadBootstrap();
+                }>('/api/lifeos/auto-schedule', { method: 'POST', body: { apply, expected } });
+                if (apply) await refreshAfterMutation();
                 return res;
               }}
             />
@@ -741,10 +813,7 @@ function DashboardShell() {
               composio={data.composio}
               onRefreshBootstrap={loadBootstrap}
               onOpenSettings={() => setSettingsOpen(true)}
-              onAskJarvis={(prompt) => {
-                setCopilotOpen(true);
-                void sendPromptToLlamrei(prompt);
-              }}
+              onAskJarvis={prepareCopilotDraft}
             />
           )}
         </main>
@@ -761,6 +830,8 @@ function DashboardShell() {
       <TaskDetailDrawer
         key={openTask?.id ?? 'none'}
         task={openTask}
+        list={data.workspace.lists.find(({ id }) => id === openTask?.list_id)}
+        onOpenRelatedTask={setOpenTaskId}
         subtasks={openTaskSubs}
         goals={data.workspace.goals}
         linkedChats={openTaskChats}
@@ -769,89 +840,116 @@ function DashboardShell() {
         onClose={() => setOpenTaskId(null)}
         onUpdateTask={async (taskId, patch) => {
           await apiRequest(`/api/workspace/tasks/${taskId}`, { method: 'PATCH', body: patch });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onUpdateTaskMeta={async (taskId, meta) => {
           await apiRequest(`/api/workspace/tasks/${taskId}/meta`, { method: 'PATCH', body: meta });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
-        onCreateDoc={async (input) => {
+        onSaveDoc={async (input) => {
           await apiRequest('/api/docs', { method: 'POST', body: input });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onDeleteDoc={async (docId) => {
           await apiRequest(`/api/docs/${docId}`, { method: 'DELETE' });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onCreateSubtask={async (parent, title) => {
           await apiRequest('/api/workspace/tasks', {
             method: 'POST',
             body: { listId: parent.list_id, parentTaskId: parent.id, title, priority: parent.priority },
           });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onDeleteTask={async (taskId) => {
           await apiRequest(`/api/workspace/tasks/${taskId}`, { method: 'DELETE' });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onStartTimer={async (tid) => {
           await apiRequest(`/api/workspace/tasks/${tid}/timer/start`, { method: 'POST', body: {} });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onStopTimer={async (tid) => {
           await apiRequest(`/api/workspace/tasks/${tid}/timer/stop`, { method: 'POST', body: {} });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onScanAttachmentFromPhone={async (taskId) => {
-          const res = await apiRequest<{ artifactLabel: string }>('/api/phonehub/camera', {
+          const result = await apiRequest<{ message: string }>('/api/phonehub/camera', {
             method: 'POST',
             body: { mode: 'scan', linkedTaskId: taskId },
           });
-          setToast({ text: `📷 Scan Continuity Camera dilampirkan: ${res.artifactLabel}` });
-          await loadBootstrap();
+          await refreshAfterMutation();
+          return result.message;
         }}
         onAskLlamrei={(prompt, ctx) => {
-          setPendingContext(ctx);
-          void sendPromptToLlamrei(prompt, ctx);
+          prepareCopilotDraft(prompt, ctx);
         }}
       />
 
-      <HardAlarmOverlayModal
-        alarm={ringingAlarm}
-        onDismiss={(id) => {
-          void apiRequest(`/api/calendar-alarms/alarms/${id}/dismiss`, { method: 'POST', body: {} }).then(() => {
-            setRingingAlarm(null);
-            void loadBootstrap();
-          });
-        }}
-        onDismissAndStartTimer={(alm) => {
-          void apiRequest(`/api/calendar-alarms/alarms/${alm.id}/dismiss`, { method: 'POST', body: {} }).then(async () => {
-            if (alm.task_id) {
-              await apiRequest(`/api/workspace/tasks/${alm.task_id}/timer/start`, { method: 'POST', body: {} });
+      {ringingAlarm && (
+        <HardAlarmOverlayModal
+          key={ringingAlarm.id}
+          alarm={ringingAlarm}
+          onDismiss={async (id) => {
+            await apiRequest(`/api/calendar-alarms/alarms/${id}/dismiss`, { method: 'POST', body: {} });
+            setRingingAlarm((current) => current?.id === id ? null : current);
+            void loadBootstrap().catch(() => undefined);
+          }}
+          onDismissAndStartTimer={async (alarm) => {
+            await apiRequest(`/api/calendar-alarms/alarms/${alarm.id}/dismiss`, { method: 'POST', body: {} });
+            setRingingAlarm((current) => current?.id === alarm.id ? null : current);
+            if (alarm.task_id) {
+              try {
+                await apiRequest(`/api/workspace/tasks/${alarm.task_id}/timer/start`, { method: 'POST', body: {} });
+              } catch {
+                setToast({ text: 'Alarm dihentikan. Timer belum dapat dimulai.' });
+              }
             }
-            setRingingAlarm(null);
-            await loadBootstrap();
-          });
-        }}
-        onSnooze={(id, minutes) => {
-          void apiRequest(`/api/calendar-alarms/alarms/${id}/snooze`, { method: 'POST', body: { minutes } }).then(() => {
-            setRingingAlarm(null);
-            void loadBootstrap();
-          });
-        }}
-      />
+            void loadBootstrap().catch(() => undefined);
+          }}
+          onSnooze={async (id, minutes) => {
+            await apiRequest(`/api/calendar-alarms/alarms/${id}/snooze`, { method: 'POST', body: { minutes } });
+            setRingingAlarm((current) => current?.id === id ? null : current);
+            void loadBootstrap().catch(() => undefined);
+          }}
+        />
+      )}
 
       <CommandPaletteModal
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}
         tasks={data.workspace.tasks}
         alarms={data.alarms}
+        calendarEvents={data.calendarEvents}
+        documents={data.workspaceDocs}
         contacts={data.contacts}
         news={data.marketFeed.news}
-        onNavigateTab={setActiveTab}
-        onSelectTask={(t) => setOpenTaskId(t.id)}
-        onAskLlamrei={(p) => void sendPromptToLlamrei(p)}
+        onNavigateTab={navigateTab}
+        onSelectTask={(task) => setOpenTaskId(task.id)}
+        onSelectEvent={(id) => openCalendarTarget({ kind: 'event', id })}
+        onSelectAlarm={(id) => openCalendarTarget({ kind: 'alarm', id })}
+        onSelectDocument={setOpenDocumentId}
+        onAskLlamrei={prepareCopilotDraft}
       />
+
+      {openDocument && (
+        <DialogPanel label="Dokumen workspace" className="workspace-form-dialog" onClose={() => setOpenDocumentId(null)}>
+          <div className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-2">
+            <h2 className="min-w-0 text-base font-semibold [overflow-wrap:anywhere]">{openDocument.title}</h2>
+            <Control aria-label="Tutup dokumen" onClick={() => setOpenDocumentId(null)}><X aria-hidden="true" /></Control>
+          </div>
+          <div className="space-y-3 p-4">
+            <p className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">{openDocument.content_md || 'Dokumen ini kosong.'}</p>
+            {openDocument.linked_task_id && (
+              <Control className="ds-control--outline" onClick={() => {
+                setOpenDocumentId(null);
+                navigateTab('clickup');
+                setOpenTaskId(openDocument.linked_task_id);
+              }}>Buka tugas tertaut</Control>
+            )}
+          </div>
+        </DialogPanel>
+      )}
 
       <SettingsModal
         key={settingsOpen ? 'settings-open' : 'settings-closed'}
@@ -860,13 +958,14 @@ function DashboardShell() {
         settings={data.settings}
         secretStatus={data.secretStatus}
         aiProviders={data.aiProviders}
+        aiBudget={data.aiBudget}
         onSaveSettings={async (patch) => {
           await apiRequest('/api/settings', { method: 'PATCH', body: patch });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onSaveSecret={async (key, value) => {
           await apiRequest('/api/settings/secrets', { method: 'POST', body: { key, value } });
-          await loadBootstrap();
+          await refreshAfterMutation();
         }}
         onRefreshProviders={async () => {
           await apiRequest('/api/ai/providers/refresh', { method: 'POST', body: {} });

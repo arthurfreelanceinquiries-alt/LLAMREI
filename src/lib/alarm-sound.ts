@@ -8,7 +8,7 @@ function playBurst(preset: string) {
     if (!Ctx) return;
     if (!audioCtx) audioCtx = new Ctx();
     if (audioCtx.state === 'suspended') {
-      void audioCtx.resume();
+      void audioCtx.resume().catch(() => undefined);
     }
 
     const now = audioCtx.currentTime;
@@ -17,7 +17,9 @@ function playBurst(preset: string) {
         ? [880, 1174, 880, 1174]
         : preset === 'zen_chime'
           ? [523.25, 659.25, 783.99]
-          : [740, 987.77, 1174.66];
+          : preset === 'bell_classic'
+            ? [660, 550, 660]
+            : [740, 987.77, 1174.66];
 
     freqs.forEach((f, idx) => {
       if (!audioCtx) return;
@@ -36,6 +38,10 @@ function playBurst(preset: string) {
   } catch {
     // Ignore autoplay errors before user gesture
   }
+}
+
+export function playAlarmSample(preset = 'tactical_pulse'): void {
+  playBurst(preset);
 }
 
 export function startHardAlarmSoundLoop(preset = 'tactical_pulse'): void {

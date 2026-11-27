@@ -3,6 +3,8 @@ import {
   ArrowDown,
   ArrowUp,
   Bell,
+  CalendarDays,
+  FileText,
   CornerDownLeft,
   MessageSquare,
   Newspaper,
@@ -12,18 +14,25 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
-import type { AlarmReminderItem, ContactItem, NavTab, NewsArticleItem, TaskItem } from '../../types/llamrei';
+import { alarmStatusLabels } from '../../lib/alarm-state';
+import { formatWibStamp } from '../../lib/calendar-time';
+import type { AlarmReminderItem, CalendarEventItem, ContactItem, NavTab, NewsArticleItem, TaskItem, WorkspaceDocItem } from '../../types/llamrei';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   tasks: TaskItem[];
   alarms: AlarmReminderItem[];
+  calendarEvents: CalendarEventItem[];
+  documents: WorkspaceDocItem[];
   contacts: ContactItem[];
   news: NewsArticleItem[];
   onNavigateTab: (tab: NavTab) => void;
   onSelectTask: (task: TaskItem) => void;
-  onAskLlamrei: (prompt: string) => void;
+  onSelectEvent: (id: string) => void;
+  onSelectAlarm: (id: string) => void;
+  onSelectDocument: (id: string) => void;
+  onAskLlamrei: (prompt: string, context?: Record<string, unknown>) => void;
 }
 
 interface Result {
@@ -39,29 +48,25 @@ interface ResultGroup {
   items: Result[];
 }
 
-const alarmStatus: Record<AlarmReminderItem['status'], string> = {
-  armed: 'Siap',
-  ringing: 'Berdering',
-  snoozed: 'Ditunda',
-  dismissed: 'Dihentikan',
-  completed: 'Selesai',
-};
-
 export function CommandPaletteModal({
   open,
   onClose,
   tasks,
   alarms,
+  calendarEvents,
+  documents,
   contacts,
   news,
   onNavigateTab,
   onSelectTask,
+  onSelectEvent,
+  onSelectAlarm,
+  onSelectDocument,
   onAskLlamrei,
 }: Props) {
   const id = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -85,13 +90,16 @@ export function CommandPaletteModal({
   }, [open]);
 
   const prompt = query.trim();
-  const q = prompt.toLowerCase();
-  const matches = (text: string) => text.toLowerCase().includes(q);
+  const terms = prompt.toLocaleLowerCase('id-ID').split(/\s+/).filter(Boolean);
+  const matches = (...fields: Array<string | null | undefined>) => {
+    const text = fields.filter(Boolean).join(' ').toLocaleLowerCase('id-ID');
+    return terms.every((term) => text.includes(term));
+  };
   const groups: ResultGroup[] = [
     {
       title: 'Tugas',
       icon: SquareCheck,
-      items: tasks.filter((task) => matches(task.title)).slice(0, 5).map((task) => ({
+      items: tasks.filter((task) => matches(task.title, task.description_md, task.tags_json, task.status)).slice(0, 5).map((task) => ({
         key: `task-${task.id}`,
         title: task.title,
         detail: task.status,
@@ -102,13 +110,32 @@ export function CommandPaletteModal({
       })),
     },
     {
+      title: 'Agenda',
+      icon: CalendarDays,
+      items: calendarEvents.filter((event) => matches(event.title, event.location, event.notes)).slice(0, 4).map((event) => ({
+        key: `event-${event.id}`,
+        title: event.title,
+        detail: formatWibStamp(event.start_at),
+        select: () => onSelectEvent(event.id),
+      })),
+    },
+    {
+      title: 'Dokumen',
+      icon: FileText,
+      items: prompt ? documents.filter((doc) => matches(doc.title, doc.content_md)).slice(0, 4).map((doc) => ({
+        key: `doc-${doc.id}`,
+        title: doc.title,
+        select: () => onSelectDocument(doc.id),
+      })) : [],
+    },
+    {
       title: 'Alarm dan pengingat',
       icon: Bell,
       items: alarms.filter((alarm) => matches(alarm.title)).slice(0, 3).map((alarm) => ({
         key: `alarm-${alarm.id}`,
         title: alarm.title,
-        detail: alarm.enabled ? alarmStatus[alarm.status] : 'Nonaktif',
-        select: () => onNavigateTab('calendar'),
+        detail: alarm.enabled ? alarmStatusLabels[alarm.status] : 'Nonaktif',
+        select: () => onSelectAlarm(alarm.id),
       })),
     },
     {
@@ -116,8 +143,7 @@ export function CommandPaletteModal({
       icon: MessageSquare,
       items: contacts.filter((contact) => matches(contact.name)).slice(0, 3).map((contact) => ({
         key: `contact-${contact.id}`,
-        title: `Jadwalkan chat ke ${contact.name}`,
-        detail: contact.phone_e164 ?? undefined,
+        title: `Siapkan draf untuk ${contact.name}`,
         select: () => onAskLlamrei(`Jadwalkan chat ke ${contact.name} jam 19:00 soal `),
       })),
     },
@@ -127,7 +153,7 @@ export function CommandPaletteModal({
       items: news.filter((article) => matches(article.title)).slice(0, 3).map((article) => ({
         key: `news-${article.id}`,
         title: article.title,
-        select: () => onAskLlamrei(`Ringkas berita ini: ${article.title}`),
+        select: () => onAskLlamrei(`Ringkas berita ini: ${article.title}`, { title: article.title, articleId: article.id, source: article.source_name }),
       })),
     },
   ];
@@ -144,7 +170,8 @@ export function CommandPaletteModal({
   const options = groups.flatMap((group) => group.items);
   const listId = `${id}-results`;
   const optionId = (index: number) => `${listId}-${index}`;
-  const activeIndex = Math.max(0, options.findIndex((option) => option.key === activeKey));
+  const currentIndex = options.findIndex((option) => option.key === activeKey);
+  const activeIndex = currentIndex < 0 && matchCount > 0 ? 0 : currentIndex;
   const activeOption = options[activeIndex];
 
   function select(result: Result) {
@@ -156,13 +183,13 @@ export function CommandPaletteModal({
     if (event.nativeEvent.isComposing || !options.length) return;
     if (event.key === 'Enter') {
       event.preventDefault();
-      select(activeOption);
+      if (activeOption) select(activeOption);
       return;
     }
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
     event.preventDefault();
     const delta = event.key === 'ArrowUp' ? -1 : 1;
-    const next = (activeIndex + delta + options.length) % options.length;
+    const next = activeIndex < 0 ? (delta === 1 ? 0 : options.length - 1) : (activeIndex + delta + options.length) % options.length;
     setActiveKey(options[next].key);
     document.getElementById(optionId(next))?.scrollIntoView({ block: 'nearest' });
   }
@@ -177,8 +204,8 @@ export function CommandPaletteModal({
         if (event.key !== 'Tab') return;
         if (event.shiftKey && event.target === inputRef.current) {
           event.preventDefault();
-          closeRef.current?.focus();
-        } else if (!event.shiftKey && event.target === closeRef.current) {
+          resultsRef.current?.focus();
+        } else if (!event.shiftKey && event.target === resultsRef.current) {
           event.preventDefault();
           inputRef.current?.focus();
         }
@@ -196,8 +223,8 @@ export function CommandPaletteModal({
             type="text"
             role="combobox"
             aria-autocomplete="list"
-            aria-expanded={open && !!activeOption}
-            aria-controls={activeOption ? listId : undefined}
+            aria-expanded={open && options.length > 0}
+            aria-controls={options.length ? listId : undefined}
             aria-activedescendant={activeOption ? optionId(activeIndex) : undefined}
             aria-describedby={`${id}-keys`}
             value={query}
@@ -207,11 +234,10 @@ export function CommandPaletteModal({
               if (resultsRef.current) resultsRef.current.scrollTop = 0;
             }}
             onKeyDown={handleSearchKey}
-            placeholder="Cari tugas, alarm, kontak, berita…"
+            placeholder="Cari tugas, agenda, dokumen…"
             className="min-h-11 min-w-0 flex-1 rounded-md bg-transparent px-2 text-base placeholder:text-[var(--text-secondary)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--accent)]"
           />
           <button
-            ref={closeRef}
             type="button"
             onClick={onClose}
             aria-label="Tutup palet perintah"
@@ -222,7 +248,13 @@ export function CommandPaletteModal({
           </button>
         </div>
 
-        <div ref={resultsRef} className="themed-scroll min-h-0 max-h-96 overflow-y-auto overscroll-contain p-2">
+        <div
+          ref={resultsRef}
+          role="region"
+          aria-label="Daftar hasil"
+          tabIndex={0}
+          className="themed-scroll min-h-0 max-h-96 overflow-y-auto overscroll-contain p-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
+        >
           <p role="status" className={matchCount ? 'sr-only' : 'px-3 py-4 text-sm text-[var(--text-secondary)]'}>
             {matchCount ? `${matchCount} hasil pencarian` : prompt ? 'Tidak ada hasil pencarian.' : 'Ketik untuk mencari atau bertanya ke Llamrei.'}
           </p>
@@ -242,12 +274,12 @@ export function CommandPaletteModal({
                       onMouseMove={() => setActiveKey(item.key)}
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => select(item)}
-                      className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md border border-transparent px-3 py-2 text-sm aria-selected:border-[var(--border-accent)] aria-selected:bg-[var(--accent-soft)]"
+                      className="flex min-h-11 cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-transparent px-3 py-2 text-sm aria-selected:border-[var(--border-accent)] aria-selected:bg-[var(--accent-soft)]"
                     >
                       <Icon size={16} aria-hidden="true" className="shrink-0 text-[var(--text-secondary)]" />
-                      <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                      <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{item.title}</span>
                       {item.detail && (
-                        <span className="max-w-[35%] shrink-0 truncate text-xs text-[var(--text-secondary)]">{item.detail}</span>
+                        <span className="hidden max-w-[35%] shrink-0 truncate text-xs sm:inline text-[var(--text-secondary)]">{item.detail}</span>
                       )}
                     </div>
                   ))}

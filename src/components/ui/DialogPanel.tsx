@@ -1,8 +1,9 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
 
-export function DialogPanel({ label, className, onClose, children }: {
+export function DialogPanel({ label, className, onClose, children, role }: {
   label: string;
   className: string;
+  role?: 'alertdialog';
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -23,6 +24,7 @@ export function DialogPanel({ label, className, onClose, children }: {
     <dialog
       ref={dialog}
       aria-label={label}
+      role={role}
       className={`ds-dialog ${className}`}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => { if (event.target !== event.currentTarget) return;

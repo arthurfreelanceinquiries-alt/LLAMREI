@@ -1,11 +1,17 @@
-import { useId, useState } from 'react';
-import type { ActiveTimer, GanttWorkloadState, ListItem, MacroGoal, SpaceItem, TaskItem, TaskTemplateItem } from '../../types/llamrei';
+import { CalendarDays, LayoutGrid, Plus, Rows3 } from 'lucide-react';
+import { useId, useState, type FormEvent } from 'react';
+import { formatWibStamp, wibDateKey, wibDateTimeToIso } from '../../lib/calendar-time';
+import { listTaskStatuses } from '../../lib/task-status';
+import { usePendingAction } from '../../lib/use-pending-action';
+import { Control } from '../ui/Control';
+import { DialogPanel } from '../ui/DialogPanel';
+import type { ActiveTimer, FolderItem, GanttWorkloadState, ListItem, SpaceItem, TaskItem, TaskTemplateItem } from '../../types/llamrei';
 
 interface Props {
   spaces: SpaceItem[];
   lists: ListItem[];
   tasks: TaskItem[];
-  goals: MacroGoal[];
+  folders: FolderItem[];
   templates: TaskTemplateItem[];
   ganttWorkload: GanttWorkloadState;
   selectedSpaceId: string | 'ALL';
@@ -27,7 +33,6 @@ interface Props {
   onStopTimer: (taskId: string) => Promise<void>;
 }
 
-const KANBAN_STATUSES = ['To Do', 'In Progress', 'Review', 'Done'];
 const VIEWS = [
   { id: 'list', label: 'Daftar' },
   { id: 'kanban', label: 'Kanban' },
@@ -38,21 +43,32 @@ const VIEWS = [
 const controlClass = 'min-h-11 min-w-0 max-w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 text-sm text-[var(--text-primary)]';
 const actionClass = `${controlClass} inline-flex items-center justify-center whitespace-nowrap font-medium hover:bg-[var(--bg-elevated)]`;
 
-function listStatuses(list: ListItem): string[] {
-  try {
-    const statuses: unknown = JSON.parse(list.statuses_json);
-    if (Array.isArray(statuses)) {
-      return statuses.flatMap((status) => (typeof status?.name === 'string' && status.name.trim() ? [status.name] : []));
-    }
-  } catch {
-    // Fall back to the workspace status defaults for legacy data.
-  }
-  return [];
+type TaskView = (typeof VIEWS)[number]['id'];
+interface ViewPreference {
+  mode: TaskView;
+  query: string;
+  priority: string;
+  status: string;
+  compact: boolean;
 }
+
+function readPreference(key: string): ViewPreference | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) ?? 'null') as Partial<ViewPreference> | null;
+    if (!value || !VIEWS.some(({ id }) => id === value.mode) || typeof value.query !== 'string' ||
+      typeof value.priority !== 'string' || typeof value.status !== 'string' || typeof value.compact !== 'boolean') return null;
+    return value as ViewPreference;
+  } catch {
+    return null;
+  }
+}
+
+const dragMime = 'application/x-llamrei-task';
 
 export function ClickUpWorkspaceView({
   spaces,
   lists,
+  folders,
   tasks,
   templates,
   ganttWorkload,
@@ -79,7 +95,13 @@ export function ClickUpWorkspaceView({
   const [newTitle, setNewTitle] = useState('');
   const [newPriority, setNewPriority] = useState<TaskItem['priority']>('high');
   const [newDue, setNewDue] = useState('');
-  const [newHardAlarm, setNewHardAlarm] = useState(true);
+  const [newHardAlarm, setNewHardAlarm] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [listChoice, setListChoice] = useState('');
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [compact, setCompact] = useState(false);
+  const [viewMessage, setViewMessage] = useState('');
+  const action = usePendingAction();
   const [newListName, setNewListName] = useState('');
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
 
@@ -88,25 +110,74 @@ export function ClickUpWorkspaceView({
   );
   const visibleListIds = new Set(visibleLists.map((l) => l.id));
 
-  const parentTasks = tasks.filter(
-    (t) =>
-      !t.parent_task_id &&
-      visibleListIds.has(t.list_id) &&
-      (priorityFilter === 'ALL' || t.priority === priorityFilter) &&
-      (!search.trim() || t.title.toLowerCase().includes(search.toLowerCase())),
-  );
-  const statusesByList = new Map(visibleLists.map((list) => [list.id, listStatuses(list)]));
+  const scopedTasks = tasks.filter((task) => !task.parent_task_id && visibleListIds.has(task.list_id));
+  const statusesByList = new Map(visibleLists.map((list) => [list.id, listTaskStatuses(list)]));
   const visibleStatuses = [...new Set([
-    ...KANBAN_STATUSES,
+    ...listTaskStatuses(),
     ...visibleLists.flatMap((list) => statusesByList.get(list.id) ?? []),
-    ...parentTasks.map((task) => task.status),
+    ...scopedTasks.map((task) => task.status),
   ])];
+  const query = search.trim().toLocaleLowerCase('id-ID');
+  const parentTasks = scopedTasks.filter((task) =>
+    (priorityFilter === 'ALL' || task.priority === priorityFilter) &&
+    (statusFilter === 'ALL' || !visibleStatuses.includes(statusFilter) || task.status === statusFilter) &&
+    (!query || `${task.title} ${task.description_md} ${task.tags_json}`.toLocaleLowerCase('id-ID').includes(query)),
+  );
+  const displayedTaskIds = new Set(parentTasks.map(({ id }) => id));
+  const timeline = ganttWorkload.timelineTasks.filter(({ id }) => displayedTaskIds.has(id));
+  const timelineStart = timeline.length ? Date.parse(timeline[0].startAt) : 0;
+  const timelineEnd = timeline.reduce((end, item) => Math.max(end, Date.parse(item.endAt)), timelineStart);
+  const timelineSpan = Math.max(timelineEnd - timelineStart, 1);
+  const targetSpaceId = selectedSpaceId !== 'ALL' ? selectedSpaceId : spaces[0]?.id;
+  const targetListId = visibleListIds.has(listChoice) ? listChoice : visibleLists[0]?.id;
+  const activeList = selectedListId === 'ALL' ? undefined : lists.find(({ id }) => id === selectedListId);
+  const activeFolder = folders.find(({ id }) => id === activeList?.folder_id);
+  const viewKey = `llamrei:task-view:${selectedSpaceId}:${selectedListId}`;
+  const savedView = readPreference(viewKey);
+  const draggedTask = parentTasks.find(({ id }) => id === draggedTaskId);
 
-  const targetSpaceId = selectedSpaceId !== 'ALL' ? selectedSpaceId : spaces[0]?.id ?? 'space_kuliah';
-  const targetListId =
-    selectedListId !== 'ALL'
-      ? selectedListId
-      : visibleLists[0]?.id ?? (selectedSpaceId === 'ALL' ? lists[0]?.id ?? null : null);
+  function updateStatus(task: TaskItem, status: string) {
+    return action.run(`status-${task.id}`, () => onUpdateTask(task.id, { status }), 'Status tugas belum dapat diperbarui.');
+  }
+
+  async function createTask(event: FormEvent) {
+    event.preventDefault();
+    const dueAt = newDue ? wibDateTimeToIso(newDue) : null;
+    if (!targetListId || !newTitle.trim() || ((newDue || newHardAlarm) && !dueAt)) return;
+
+    if (await action.run('create', () => onCreateTask({
+      listId: targetListId,
+      title: newTitle.trim(),
+      priority: newPriority,
+      dueAt,
+      hardAlarmEnabled: newHardAlarm,
+    }), 'Tugas belum dapat disimpan. Periksa koneksi dan coba lagi.')) {
+      setNewTitle('');
+      setNewDue('');
+      setNewHardAlarm(false);
+      setCreateOpen(false);
+    }
+  }
+
+  function saveView() {
+    const preference: ViewPreference = { mode: viewMode, query: search, priority: priorityFilter, status: statusFilter, compact };
+    try {
+      localStorage.setItem(viewKey, JSON.stringify(preference));
+      setViewMessage('Tampilan disimpan di browser ini.');
+    } catch {
+      setViewMessage('Browser tidak dapat menyimpan tampilan ini.');
+    }
+  }
+
+  function restoreView() {
+    if (!savedView) return;
+    setViewMode(savedView.mode);
+    setSearch(savedView.query);
+    setPriorityFilter(savedView.priority);
+    setStatusFilter(savedView.status);
+    setCompact(savedView.compact);
+    setViewMessage('Tampilan tersimpan dimuat.');
+  }
 
   const getSpaceBadge = (listId: string) => {
     const l = lists.find((x) => x.id === listId);
@@ -118,10 +189,11 @@ export function ClickUpWorkspaceView({
     <select
       aria-label={`Status ${task.title}`}
       value={task.status}
-      onChange={(event) => void onUpdateTask(task.id, { status: event.target.value })}
+      disabled={!!action.pending}
+      onChange={(event) => void updateStatus(task, event.target.value)}
       className={controlClass}
     >
-      {[...new Set([...KANBAN_STATUSES, ...(statusesByList.get(task.list_id) ?? []), task.status])].map((status) => (
+      {listTaskStatuses(lists.find(({ id }) => id === task.list_id), task.status).map((status) => (
         <option key={status} value={status}>{status}</option>
       ))}
     </select>
@@ -139,9 +211,11 @@ export function ClickUpWorkspaceView({
           <div className="min-w-0 space-y-1">
             <p className="text-sm text-[var(--text-secondary)] [overflow-wrap:anywhere]">
               {selectedSpaceId === 'ALL' ? 'Semua ruang kerja' : spaces.find((space) => space.id === selectedSpaceId)?.name}
-              {selectedListId !== 'ALL' && ` / ${visibleLists[0]?.name ?? 'List'}`}
+              {activeFolder && ` / ${activeFolder.name}`}
+              {activeList && ` / ${activeList.name}`}
             </p>
             <h1 className="text-2xl font-semibold tracking-tight @[640px]/tasks:text-3xl">Tugas</h1>
+            <p className="text-sm text-[var(--text-secondary)]">{parentTasks.length} dari {scopedTasks.length} tugas</p>
           </div>
           <div role="group" aria-label="Impor dan ekspor tugas" className="flex flex-wrap items-center gap-2">
           <a
@@ -167,6 +241,7 @@ export function ClickUpWorkspaceView({
               Impor
             </button>
           )}
+            {targetListId && <Control className="ds-control--primary" onClick={() => setCreateOpen(true)}><Plus aria-hidden="true" /> Tugas baru</Control>}
           </div>
         </div>
         <div
@@ -207,61 +282,34 @@ export function ClickUpWorkspaceView({
         </div>
       </header>
 
-      {/* Quick Create Task + Filters */}
-      {!targetListId ? (
-        <p className="themed-card p-4 text-sm text-[var(--text-secondary)]">
-          Buat daftar untuk menambahkan tugas atau menggunakan templat.
-        </p>
-      ) : (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!newTitle.trim()) return;
-            void onCreateTask({
-              listId: targetListId,
-              title: newTitle.trim(),
-              priority: newPriority,
-              dueAt: newDue ? new Date(`${newDue}:00+07:00`).toISOString() : new Date(Date.now() + 2 * 3_600_000).toISOString(),
-              hardAlarmEnabled: newHardAlarm,
-            });
-            setNewTitle('');
-          }}
-          className="themed-card grid grid-cols-2 items-center gap-2 p-3 @[660px]/tasks:flex @[660px]/tasks:flex-wrap"
-        >
-          <input
-            aria-label="Judul tugas baru"
-            required
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            placeholder="Judul tugas baru"
-            className={`${controlClass} col-span-full w-full @[660px]/tasks:w-auto @[660px]/tasks:flex-1`}
-          />
-          <select
-            aria-label="Prioritas tugas baru"
-            value={newPriority}
-            onChange={(e) => setNewPriority(e.target.value as TaskItem['priority'])}
-            className={controlClass}
-          >
-            <option value="urgent">Urgent</option>
-            <option value="high">High</option>
-            <option value="normal">Normal</option>
-            <option value="low">Low</option>
-          </select>
-          <label className="inline-flex min-h-11 items-center gap-2 text-sm text-[var(--text-secondary)]">
-            <input type="checkbox" checked={newHardAlarm} onChange={(e) => setNewHardAlarm(e.target.checked)} className="size-4 accent-[var(--accent)]" />
-            <span>Hard Alarm</span>
-          </label>
-          <input
-            aria-label="Tenggat tugas baru (WIB)"
-            type="datetime-local"
-            value={newDue}
-            onChange={(e) => setNewDue(e.target.value)}
-            className={`${controlClass} col-span-full w-full @[660px]/tasks:w-auto`}
-          />
-          <button type="submit" className="col-span-full min-h-11 rounded-lg bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-fg)]">
-            Buat tugas
-          </button>
-        </form>
+      {action.error && !createOpen && <p className="ds-note" role="alert">{action.error}</p>}
+      {createOpen && targetListId && (
+        <DialogPanel label="Tugas baru" className="workspace-form-dialog" onClose={() => { if (!action.pending) setCreateOpen(false); }}>
+          <form onSubmit={(event) => void createTask(event)} className="space-y-3 p-4">
+            <h2 className="text-base font-semibold">Tugas baru</h2>
+            <label className="ds-label">Judul tugas baru<input className="ds-field" autoFocus required value={newTitle} onChange={(event) => setNewTitle(event.target.value)} /></label>
+            <label className="ds-label">Daftar tujuan
+              <select className="ds-field" value={targetListId} onChange={(event) => setListChoice(event.target.value)}>
+                {visibleLists.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
+              </select>
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="ds-label">Prioritas tugas baru
+                <select className="ds-field" value={newPriority} onChange={(event) => setNewPriority(event.target.value as TaskItem['priority'])}>
+                  <option value="urgent">Mendesak</option><option value="high">Tinggi</option>
+                  <option value="normal">Normal</option><option value="low">Rendah</option>
+                </select>
+              </label>
+              <label className="ds-label">Tenggat tugas baru (WIB)<input className="ds-field" type="datetime-local" required={newHardAlarm} value={newDue} onChange={(event) => setNewDue(event.target.value)} /></label>
+            </div>
+            <label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={newHardAlarm} onChange={(event) => setNewHardAlarm(event.target.checked)} /> Hard alarm pada tenggat</label>
+            {action.error && <p className="ds-note" role="alert">{action.error}</p>}
+            <div className="flex justify-end gap-2">
+              <Control disabled={!!action.pending} onClick={() => setCreateOpen(false)}>Batal</Control>
+              <Control type="submit" className="ds-control--primary" disabled={!!action.pending || !newTitle.trim()}>{action.pending === 'create' ? 'Menyimpan…' : 'Buat tugas'}</Control>
+            </div>
+          </form>
+        </DialogPanel>
       )}
 
       {/* CSV / Markdown Importer Modal-inline (FR-21) */}
@@ -270,9 +318,12 @@ export function ClickUpWorkspaceView({
           onSubmit={async (e) => {
             e.preventDefault();
             if (!importContent.trim()) return;
-            const res = await onImportTasks(targetListId, importFormat, importContent);
-            setImportMsg(`Berhasil mengimpor ${res.importedCount} tugas ke list aktif.`);
-            setImportContent('');
+            setImportMsg(null);
+            await action.run('import', async () => {
+              const res = await onImportTasks(targetListId, importFormat, importContent);
+              setImportMsg(`${res.importedCount} tugas diimpor.`);
+              setImportContent('');
+            }, 'Impor belum dapat diselesaikan. Periksa format dan koneksi.');
           }}
           className="themed-card space-y-3 p-3 text-sm"
         >
@@ -293,11 +344,11 @@ export function ClickUpWorkspaceView({
             rows={3}
             value={importContent}
             onChange={(e) => setImportContent(e.target.value)}
-            placeholder={importFormat === 'markdown' ? '- [ ] **[HIGH]** Review Bab 4' : 'title,priority,status\nReview Bab 4,high,To Do'}
+            placeholder={importFormat === 'markdown' ? '- [ ] **[HIGH]** Tinjau laporan' : 'title,priority,status\nTinjau laporan,high,To Do'}
             className={`${controlClass} w-full py-2 font-mono-num`}
           />
           <div className="flex items-center gap-2">
-            <button type="submit" className={actionClass}>
+            <button type="submit" className={actionClass} disabled={!!action.pending || !importContent.trim()}>
               Impor sekarang
             </button>
             {importMsg && <span role="status" className="text-[var(--text-secondary)]">{importMsg}</span>}
@@ -328,17 +379,23 @@ export function ClickUpWorkspaceView({
             <option value="normal">Normal</option>
             <option value="low">Low</option>
           </select>
+          <select aria-label="Filter status tugas" value={visibleStatuses.includes(statusFilter) ? statusFilter : 'ALL'} onChange={(event) => setStatusFilter(event.target.value)} className={controlClass}>
+            <option value="ALL">Semua status</option>
+            {visibleStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+          </select>
         </div>
 
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           {targetListId && (
             <select
               aria-label="Terapkan templat tugas"
+              disabled={!!action.pending}
               defaultValue=""
               onChange={(e) => {
                 if (!e.target.value) return;
-                void onApplyTemplate(e.target.value, targetListId);
+                const id = e.target.value;
                 e.target.value = '';
+                void action.run('template', () => onApplyTemplate(id, targetListId), 'Templat belum dapat diterapkan.');
               }}
               className={controlClass}
             >
@@ -352,11 +409,10 @@ export function ClickUpWorkspaceView({
           )}
 
           <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!newListName.trim()) return;
-              void onCreateList(targetSpaceId, newListName.trim());
-              setNewListName('');
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!targetSpaceId || !newListName.trim()) return;
+              if (await action.run('list', () => onCreateList(targetSpaceId, newListName.trim()), 'Daftar belum dapat dibuat.')) setNewListName('');
             }}
             className="flex gap-1"
           >
@@ -367,11 +423,18 @@ export function ClickUpWorkspaceView({
               placeholder="Nama daftar baru"
               className={`${controlClass} w-36`}
             />
-            <button type="submit" className={actionClass}>
+            <button type="submit" className={actionClass} disabled={!targetSpaceId || !!action.pending || !newListName.trim()}>
               Buat daftar
             </button>
           </form>
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1 border-b border-[var(--border-subtle)] pb-2">
+        <Control aria-pressed={compact} disabled={viewMode !== 'list'} onClick={() => setCompact(!compact)}><Rows3 aria-hidden="true" /> Daftar ringkas</Control>
+        <Control onClick={saveView}>Simpan tampilan</Control>
+        {savedView && <Control onClick={restoreView}>Muat tampilan</Control>}
+        {viewMessage && <span className="text-xs text-[var(--text-secondary)]" role="status">{viewMessage}</span>}
       </div>
 
       <div id={`${viewId}-panel`} role="tabpanel" aria-labelledby={`${viewId}-${viewMode}`} className="min-w-0">
@@ -396,7 +459,7 @@ export function ClickUpWorkspaceView({
                   return (
                     <li
                       key={t.id}
-                      className="grid min-w-0 grid-cols-1 items-center gap-2 px-4 py-3 hover:bg-[var(--bg-panel)] @[680px]/tasks:grid-cols-[minmax(0,1fr)_auto]"
+                      className={`grid min-w-0 grid-cols-1 items-center gap-2 px-4 ${compact ? 'py-1.5' : 'py-3'} hover:bg-[var(--bg-panel)] @[680px]/tasks:grid-cols-[minmax(0,1fr)_auto]`}
                     >
                       <div className="min-w-0 space-y-1">
                         <p className="flex items-start gap-2 text-xs text-[var(--text-secondary)] [overflow-wrap:anywhere]">
@@ -422,7 +485,8 @@ export function ClickUpWorkspaceView({
                         </span>
                         {statusControl(t)}
                         <button
-                          onClick={() => void (isRunning ? onStopTimer(t.id) : onStartTimer(t.id))}
+                          disabled={!!action.pending}
+                          onClick={() => void action.run('timer', () => isRunning ? onStopTimer(t.id) : onStartTimer(t.id), 'Timer belum dapat diperbarui.')}
                           aria-label={`${isRunning ? 'Hentikan timer' : 'Mulai timer'} ${t.title}`}
                           className={actionClass}
                         >
@@ -447,14 +511,18 @@ export function ClickUpWorkspaceView({
             return (
               <section
                 key={col}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={() => {
-                  if (draggedTaskId) {
-                    void onUpdateTask(draggedTaskId, { status: col });
-                    setDraggedTaskId(null);
-                  }
+                aria-label={`Kolom ${col}`}
+                onDragOver={(event) => {
+                  if (!action.pending && draggedTask && (statusesByList.get(draggedTask.list_id) ?? []).includes(col)) event.preventDefault();
                 }}
-                className="themed-card min-w-0 space-y-3 p-3"
+                onDrop={(event) => {
+                  const id = event.dataTransfer.getData(dragMime);
+                  if (!draggedTask || id !== draggedTask.id || !(statusesByList.get(draggedTask.list_id) ?? []).includes(col)) return;
+                  event.preventDefault();
+                  if (draggedTask.status !== col) void updateStatus(draggedTask, col);
+                  setDraggedTaskId(null);
+                }}
+                className="themed-card min-h-28 min-w-0 space-y-3 p-3"
               >
                 <h2 className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-2 text-sm font-semibold [overflow-wrap:anywhere]">
                   {col}
@@ -470,7 +538,7 @@ export function ClickUpWorkspaceView({
                         draggable
                         onDragStart={(event) => {
                           event.dataTransfer.effectAllowed = 'move';
-                          event.dataTransfer.setData('text/plain', t.id);
+                          event.dataTransfer.setData(dragMime, t.id);
                           setDraggedTaskId(t.id);
                         }}
                         onDragEnd={() => setDraggedTaskId(null)}
@@ -497,100 +565,67 @@ export function ClickUpWorkspaceView({
         </div>
       )}
 
-      {/* VIEW 3: INLINE CALENDAR VIEW */}
       {viewMode === 'calendar' && (
-        <div className="themed-card p-3 space-y-2">
-          <div className="text-xs font-mono-num" style={{ color: 'var(--text-muted)' }}>
-            PROYEKSI JADWAL TUGAS DI KALENDER
-          </div>
-          {parentTasks
-            .filter((t) => t.due_at || t.start_at)
-            .sort((a, b) => (a.start_at ?? a.due_at ?? '').localeCompare(b.start_at ?? b.due_at ?? ''))
-            .map((t) => (
-              <div
-                key={t.id}
-                onClick={() => onOpenTask(t)}
-                className="flex items-center justify-between px-3 py-2 rounded bg-black/25 border-l-2 cursor-pointer"
-                style={{ borderLeftColor: t.hard_alarm_enabled ? '#f59e0b' : 'var(--accent)' }}
-              >
-                <div>
-                  <div className="text-xs font-semibold">
-                    {t.hard_alarm_enabled ? '⏰ ' : ''}
-                    {t.title}
-                  </div>
-                  <div className="text-xs font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                    Status: {t.status} · Prioritas: {t.priority}
-                  </div>
-                </div>
-                <div className="text-xs font-mono-num" style={{ color: 'var(--accent)' }}>
-                  {new Date(t.start_at ?? t.due_at!).toLocaleString('id-ID', {
-                    timeZone: 'Asia/Jakarta',
-                    dateStyle: 'medium',
-                    timeStyle: 'short',
-                  })}
-                </div>
-              </div>
-            ))}
-        </div>
-      )}
-      {/* VIEW 4: GANTT TIMELINE & WEEKLY WORKLOAD (FR-20) */}
-      {viewMode === 'gantt' && (
-        <div className="space-y-3">
-          <div className="themed-card p-3 space-y-2 text-xs">
-            <div className="font-mono-num font-bold" style={{ color: 'var(--text-secondary)' }}>
-              📊 PETA BEBAN KERJA MINGGUAN (WORKLOAD CAPACITY)
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
-              {ganttWorkload.weeklyWorkload.map((d) => {
-                const loadPct = Math.min(100, Math.round((d.estimatedMinutes / 360) * 100));
-                return (
-                  <div key={d.dateWib} className="bg-black/25 p-2 rounded space-y-1">
-                    <div className="font-mono-num font-bold">{d.dateWib.slice(5)}</div>
-                    <div className="h-2 rounded-full overflow-hidden bg-black/40">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${loadPct}%`,
-                          background: loadPct > 85 ? '#ef4444' : loadPct > 60 ? '#f59e0b' : 'var(--accent)',
-                        }}
-                      />
-                    </div>
-                    <div className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                      {d.taskCount} tgs · {d.estimatedMinutes}m
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="themed-card p-3 space-y-2 text-xs">
-            <div className="font-mono-num font-bold" style={{ color: 'var(--text-secondary)' }}>
-              📈 GANTT TIMELINE TUGAS
-            </div>
-            {ganttWorkload.timelineTasks.map((item) => {
-              const barPct = Math.min(100, Math.max(15, Math.round((item.estimateMinutes / 180) * 100)));
+        <section className="themed-card p-4">
+          <h2 className="mb-2 flex items-center gap-2 font-semibold"><CalendarDays size={18} aria-hidden="true" /> Jadwal tugas</h2>
+          {timeline.length === 0 && <p className="text-sm text-[var(--text-secondary)]">Belum ada jadwal untuk tugas yang dipilih.</p>}
+          <ul className="divide-y divide-[var(--border-subtle)]">
+            {timeline.map((item) => {
+              const task = parentTasks.find(({ id }) => id === item.id);
+              if (!task) return null;
               return (
-                <div key={item.id} className="bg-black/25 p-2 rounded space-y-1">
-                  <div className="flex justify-between">
-                    <span className="font-semibold truncate">{item.title}</span>
-                    <span className="font-mono-num shrink-0 ml-2" style={{ color: 'var(--text-muted)' }}>
-                      {new Date(item.startAt).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', dateStyle: 'short', timeStyle: 'short' })} ({item.estimateMinutes}m)
-                    </span>
-                  </div>
-                  <div className="h-2.5 rounded bg-black/40 overflow-hidden">
-                    <div
-                      className="h-full rounded"
-                      style={{
-                        width: `${barPct}%`,
-                        background: item.status === 'Done' ? 'var(--accent)' : item.priority === 'urgent' ? '#ef4444' : 'var(--accent-2)',
-                      }}
-                    />
-                  </div>
-                </div>
+                <li key={item.id}>
+                  <button type="button" onClick={() => onOpenTask(task)} className="grid min-h-11 w-full min-w-0 gap-1 rounded-md px-2 py-2 text-left hover:bg-[var(--bg-elevated)]">
+                    <span className="text-sm font-semibold [overflow-wrap:anywhere]">{item.title}</span>
+                    <span className="text-xs text-[var(--text-secondary)]">{formatWibStamp(item.startAt)} · {item.status}</span>
+                  </button>
+                </li>
               );
             })}
-          </div>
+          </ul>
+        </section>
+      )}
+      {viewMode === 'gantt' && (
+        <div className="space-y-3">
+          <section className="themed-card p-4">
+            <h2 className="mb-3 flex items-center gap-2 font-semibold"><LayoutGrid size={18} aria-hidden="true" /> Beban tujuh hari ke depan</h2>
+            <ul className="grid grid-cols-2 gap-2 sm:grid-cols-4 @[700px]/tasks:grid-cols-7">
+              {ganttWorkload.weeklyWorkload.map(({ dateWib }) => {
+                const scheduled = timeline.filter((item) => item.status !== 'Done' && wibDateKey(item.startAt) === dateWib);
+                return (
+                  <li key={dateWib} className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2 text-xs">
+                    <p className="font-semibold">{dateWib.slice(8)} / {dateWib.slice(5, 7)}</p>
+                    <p className="mt-1 text-[var(--text-secondary)]">{scheduled.length} tugas</p>
+                    <p className="text-[var(--text-secondary)]">{scheduled.reduce((sum, item) => sum + item.estimateMinutes, 0)} mnt estimasi</p>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+          <section className="themed-card p-4">
+            <h2 className="mb-2 font-semibold">Linimasa</h2>
+            {timeline.length === 0 && <p className="text-sm text-[var(--text-secondary)]">Linimasa akan tampil saat tugas yang dipilih memiliki jadwal.</p>}
+            <ul className="divide-y divide-[var(--border-subtle)]">
+              {timeline.map((item) => {
+                const start = Date.parse(item.startAt);
+                const left = 100 * (start - timelineStart) / timelineSpan;
+                const width = 100 * (Date.parse(item.endAt) - start) / timelineSpan;
+                const task = parentTasks.find(({ id }) => id === item.id);
+                if (!task) return null;
+                return (
+                  <li key={item.id}>
+                    <button type="button" onClick={() => onOpenTask(task)} className="grid min-h-11 w-full gap-1 rounded-md px-2 py-2 text-left hover:bg-[var(--bg-elevated)]">
+                      <span className="text-sm font-semibold [overflow-wrap:anywhere]">{item.title}</span>
+                      <span className="text-xs text-[var(--text-secondary)]">{formatWibStamp(item.startAt)}{Date.parse(item.endAt) > Date.parse(item.startAt) ? ` – ${formatWibStamp(item.endAt)}` : ''}</span>
+                      <span className="relative mt-1 block h-1.5 overflow-hidden rounded-full bg-[var(--bg-elevated)]" aria-hidden="true">
+                        <span className="absolute h-full min-w-1 rounded-full bg-[var(--accent)]" style={{ left: `min(${left}%, calc(100% - .25rem))`, width: `${width}%` }} />
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         </div>
       )}
       </div>

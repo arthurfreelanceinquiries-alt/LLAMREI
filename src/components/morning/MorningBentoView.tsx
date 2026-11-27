@@ -3,6 +3,7 @@ import {
   AlarmClock,
   ArrowRight,
   CalendarDays,
+  ClipboardCheck,
   CheckCircle2,
   ChevronRight,
   CircleCheckBig,
@@ -14,6 +15,9 @@ import {
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
+import { alarmStatusLabels, alarmTime, isActiveAlarm } from '../../lib/alarm-state';
+import { usePendingAction } from '../../lib/use-pending-action';
+import type { CalendarTarget } from '../alarms/CalendarAndAlarmView';
 import { useTheme } from '../../theme/ThemeContext';
 import type {
   AlarmReminderItem,
@@ -36,11 +40,14 @@ interface Props {
   news: NewsArticleItem[];
   economicEvents: EconomicEventItem[];
   watchlistSymbol: string;
+  pendingApprovalCount: number;
   onSelectWatchlistSymbol: (sym: string) => void;
   onSaveCheckIn: (input: { sleepHours: number; energyLevel: number; mentalState: DailyCheckInItem['mental_state'] }) => Promise<void>;
   onToggleHabit: (habitId: string, completed: boolean) => Promise<void>;
   onCycleTaskStatus: (task: TaskItem) => Promise<void>;
   onOpenTask: (task: TaskItem) => void;
+  onOpenCalendarTarget: (target: CalendarTarget) => void;
+  onOpenCopilot: () => void;
   onNavigateTab: (tab: NavTab) => void;
   onAskLlamreiWithContext: (prompt: string, context: Record<string, unknown>) => void;
   onAutoSchedule: () => void;
@@ -100,17 +107,21 @@ export function MorningBentoView({
   news,
   economicEvents,
   watchlistSymbol,
+  pendingApprovalCount,
   onSelectWatchlistSymbol,
   onSaveCheckIn,
   onToggleHabit,
   onCycleTaskStatus,
   onOpenTask,
+  onOpenCalendarTarget,
+  onOpenCopilot,
   onNavigateTab,
   onAskLlamreiWithContext,
   onAutoSchedule,
   onRefreshMarket,
 }: Props) {
   const { theme } = useTheme();
+  const action = usePendingAction();
   const [sleepHours, setSleepHours] = useState(kpis.todayCheckIn?.sleep_hours ?? 7);
   const [energyLevel, setEnergyLevel] = useState(kpis.todayCheckIn?.energy_level ?? 4);
   const [mentalState, setMentalState] = useState<DailyCheckInItem['mental_state']>(kpis.todayCheckIn?.mental_state ?? 'focused');
@@ -165,8 +176,9 @@ export function MorningBentoView({
     .filter((task) => !task.parent_task_id && task.status !== 'Done')
     .sort((a, b) => priorities[a.priority].rank - priorities[b.priority].rank)
     .slice(0, 4);
-  const nextHardAlarm = alarms.find((alarm) => alarm.kind === 'hard_alarm' && alarm.enabled === 1 && alarm.status === 'ringing') ??
-    alarms.find((alarm) => alarm.kind === 'hard_alarm' && alarm.enabled === 1 && (alarm.status === 'armed' || alarm.status === 'snoozed'));
+  const hardAlarms = alarms.filter((alarm) => alarm.kind === 'hard_alarm' && isActiveAlarm(alarm));
+  const nextHardAlarm = hardAlarms.find((alarm) => alarm.status === 'ringing') ??
+    hardAlarms.sort((left, right) => Date.parse(alarmTime(left)) - Date.parse(alarmTime(right)))[0];
   const upcoming = calendarEvents
     .filter((event) => Date.parse(event.end_at ?? event.start_at) >= now)
     .sort((a, b) => Date.parse(a.start_at) - Date.parse(b.start_at))
@@ -213,6 +225,15 @@ export function MorningBentoView({
           Susun jadwal
         </button>
       </header>
+
+      {pendingApprovalCount > 0 && (
+        <button type="button" onClick={onOpenCopilot} className="themed-card flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--bg-elevated)]">
+          <ClipboardCheck size={17} aria-hidden="true" className="text-[var(--accent)]" />
+          <span className="flex-1">{pendingApprovalCount} aksi menunggu persetujuan</span>
+          <ArrowRight size={16} aria-hidden="true" />
+        </button>
+      )}
+      {action.error && <p className="ds-note" role="alert">{action.error}</p>}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4" role="group" aria-label="Ringkasan aktivitas">
         <section className={card} aria-labelledby="overview-tasks-metric">
@@ -273,7 +294,8 @@ export function MorningBentoView({
                       <span className="text-xs font-medium" style={{ color: priorities[task.priority].color }}>{priorities[task.priority].label}</span>
                       <button
                         type="button"
-                        onClick={() => void onCycleTaskStatus(task)}
+                        disabled={!!action.pending}
+                        onClick={() => void action.run(task.id, () => onCycleTaskStatus(task), 'Status tugas belum dapat diperbarui.')}
                         aria-label={`Ubah status ${task.title}, saat ini ${task.status}`}
                         className="inline-flex min-h-8 cursor-pointer items-center gap-0.5 rounded px-1 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
                       >
@@ -303,23 +325,26 @@ export function MorningBentoView({
             </button>
           </header>
           {nextHardAlarm && (
-            <div className="my-2 flex min-w-0 items-start gap-2 rounded-lg bg-[var(--bg-elevated)] px-3 py-2.5 text-sm">
-              <AlarmClock size={17} className="mt-0.5 shrink-0 text-[var(--warning,var(--accent))]" aria-hidden />
-              <div className="min-w-0">
-                <p className="font-medium">{nextHardAlarm.status === 'ringing' ? 'Alarm berbunyi' : 'Alarm aktif'} · {nextHardAlarm.title}</p>
-                <p className="mt-0.5 text-xs text-[var(--text-secondary)]">{dateLabel(nextHardAlarm.snoozed_until ?? nextHardAlarm.trigger_at)}</p>
-              </div>
-            </div>
+            <button type="button" onClick={() => onOpenCalendarTarget({ kind: 'alarm', id: nextHardAlarm.id })} className="my-2 flex w-full min-w-0 items-start gap-2 rounded-lg bg-[var(--bg-elevated)] px-3 py-2.5 text-left text-sm">
+              <AlarmClock size={17} className="mt-0.5 shrink-0 text-[var(--warning)]" aria-hidden="true" />
+              <span className="grid min-w-0 flex-1 gap-1 [overflow-wrap:anywhere]">
+                <span className="font-medium">{alarmStatusLabels[nextHardAlarm.status]} · {nextHardAlarm.title}</span>
+                <span className="text-xs text-[var(--text-secondary)]">{dateLabel(alarmTime(nextHardAlarm))}</span>
+              </span>
+              <ChevronRight size={16} aria-hidden="true" />
+            </button>
           )}
           {upcoming.length > 0 ? (
             <ul>
               {upcoming.map((event) => (
-                <li key={event.id} className={`${rowBorder} flex items-start gap-2 py-2.5 text-sm`}>
-                  <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full border border-[var(--border-subtle)]" style={{ background: event.color }} aria-hidden />
-                  <div className="min-w-0">
-                    <p className="font-medium">{event.title}</p>
-                    <p className="mt-0.5 text-xs text-[var(--text-secondary)]">{dateLabel(event.start_at)}</p>
-                  </div>
+                <li key={event.id} className={rowBorder}>
+                  <button type="button" onClick={() => onOpenCalendarTarget({ kind: 'event', id: event.id })} className="flex min-h-11 w-full min-w-0 items-start gap-2 rounded-md px-1 py-2 text-left text-sm hover:bg-[var(--bg-elevated)]">
+                    <span className="mt-1.5 size-2 shrink-0 rounded-full" style={{ background: event.color }} aria-hidden="true" />
+                    <span className="grid min-w-0 flex-1 gap-1 [overflow-wrap:anywhere]">
+                      <span className="font-medium">{event.title}</span>
+                      <span className="text-xs text-[var(--text-secondary)]">{dateLabel(event.start_at)}</span>
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -411,7 +436,8 @@ export function MorningBentoView({
               <button
                 key={habit.id}
                 type="button"
-                onClick={() => void onToggleHabit(habit.id, !habit.completedToday)}
+                disabled={!!action.pending}
+                onClick={() => void action.run(habit.id, () => onToggleHabit(habit.id, !habit.completedToday), 'Kebiasaan belum dapat diperbarui.')}
                 aria-pressed={habit.completedToday}
                 className={`${control} inline-flex max-w-full cursor-pointer items-center gap-2 py-1 text-left hover:bg-[var(--accent-soft)]`}
                 style={habit.completedToday ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
