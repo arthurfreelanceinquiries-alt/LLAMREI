@@ -1,3 +1,4 @@
+import { shiftCalendarEnd } from '../../shared/calendar-range.ts';
 import { getDb } from '../db/connection.ts';
 import { sseBus } from '../lib/sse.ts';
 import { pushPhoneNotification, ringPhone } from './nectarlink.service.ts';
@@ -43,13 +44,13 @@ export interface CalendarEventRow {
 
 export function listCalendarEvents(): CalendarEventRow[] {
   const db = getDb();
-  return db.prepare('SELECT * FROM calendar_events ORDER BY start_at ASC').all() as unknown as CalendarEventRow[];
+  return db.prepare('SELECT * FROM calendar_events ORDER BY julianday(start_at), id').all() as unknown as CalendarEventRow[];
 }
 
 export function listAlarmsAndReminders(): AlarmReminderRow[] {
   const db = getDb();
   return db
-    .prepare('SELECT * FROM task_alarms_reminders ORDER BY trigger_at ASC')
+    .prepare('SELECT * FROM task_alarms_reminders ORDER BY julianday(trigger_at), id')
     .all() as unknown as AlarmReminderRow[];
 }
 
@@ -60,7 +61,7 @@ export function getNextArmedAlarm(): AlarmReminderRow | null {
       `SELECT * FROM task_alarms_reminders
        WHERE enabled = 1 AND status IN ('armed', 'snoozed', 'ringing')
        ORDER BY CASE WHEN status = 'ringing' THEN 0 ELSE 1 END,
-                COALESCE(snoozed_until, trigger_at) ASC
+                julianday(COALESCE(snoozed_until, trigger_at)) ASC
        LIMIT 1`,
     )
     .get() as unknown as AlarmReminderRow | undefined;
@@ -71,7 +72,7 @@ export function getNextArmedAlarm(): AlarmReminderRow | null {
  * Projects a ClickUp task's time onto the Website Calendar and updates its
  * two-tier Soft Reminder (H-offset) + Hard Alarm records atomically.
  */
-export function syncTaskToCalendarAndAlarms(taskId: string): void {
+export function syncTaskToCalendarAndAlarms(taskId: string, options?: { reopen?: boolean; enableHardAlarm?: boolean }): void {
   const db = getDb();
   const task = db
     .prepare(
@@ -101,7 +102,8 @@ export function syncTaskToCalendarAndAlarms(taskId: string): void {
 
   if (!task) return;
 
-  const anchorStart = task.auto_scheduled_block_start ?? task.start_at ?? task.due_at;
+  const anchorStart = task.auto_scheduled_block_start ?? task.start_at ?? task.due_at ??
+    (task.hard_alarm_enabled ? task.hard_alarm_at : null);
   const anchorEnd = task.auto_scheduled_block_end ?? task.due_at ?? anchorStart;
   const calId = `cal_task_${task.id}`;
 
@@ -140,32 +142,51 @@ export function syncTaskToCalendarAndAlarms(taskId: string): void {
     return;
   }
 
-  // Re-arm Soft Reminders (FR-61 Tier 1)
-  db.prepare("DELETE FROM task_alarms_reminders WHERE task_id = ? AND kind = 'soft_reminder' AND status IN ('armed','snoozed')").run(
-    task.id,
-  );
-  const offsets = JSON.parse(task.reminder_offsets_json || '[15]') as number[];
+  const offsets = [...new Set(JSON.parse(task.reminder_offsets_json || '[15]') as number[])]
+    .filter((offset) => Number.isFinite(offset) && offset >= 0);
+  db.prepare(
+    `DELETE FROM task_alarms_reminders WHERE task_id = ? AND kind = 'soft_reminder'
+     AND status IN ('armed','snoozed') AND offset_minutes NOT IN (SELECT value FROM json_each(?))`,
+  ).run(task.id, JSON.stringify(offsets));
+
+  // Preserve delivery history on edits that leave the alarm instant unchanged.
+  const rearm = `(julianday(task_alarms_reminders.trigger_at) IS NOT julianday(excluded.trigger_at)
+    OR ($rearm AND task_alarms_reminders.enabled = 0))`;
+  const updateTiming = `
+    trigger_at = excluded.trigger_at,
+    enabled = CASE WHEN ${rearm} THEN 1 ELSE task_alarms_reminders.enabled END,
+    status = CASE WHEN ${rearm} THEN 'armed' ELSE task_alarms_reminders.status END,
+    snoozed_until = CASE WHEN ${rearm} THEN NULL ELSE task_alarms_reminders.snoozed_until END`;
   const baseMs = Date.parse(anchorStart);
-  if (!Number.isNaN(baseMs)) {
-    const ins = db.prepare(
+  if (Number.isFinite(baseMs)) {
+    const existingReminder = db.prepare(
+      `SELECT id FROM task_alarms_reminders WHERE task_id = ? AND kind = 'soft_reminder'
+       AND offset_minutes = ? ORDER BY id = ? DESC, created_at DESC LIMIT 1`,
+    );
+    const upsertReminder = db.prepare(
       `INSERT INTO task_alarms_reminders (id, task_id, calendar_event_id, title, subtitle, kind, trigger_at, offset_minutes, sound_preset, ring_phone_nectarlink, enabled, status)
-       VALUES (?, ?, ?, ?, ?, 'soft_reminder', ?, ?, 'zen_chime', 1, 1, 'armed')`,
+       VALUES (?, ?, ?, ?, ?, 'soft_reminder', ?, ?, 'zen_chime', 1, 1, 'armed')
+       ON CONFLICT(id) DO UPDATE SET title = excluded.title, subtitle = excluded.subtitle,
+         calendar_event_id = excluded.calendar_event_id, ${updateTiming}`,
     );
     for (const offset of offsets) {
-      const triggerIso = new Date(baseMs - offset * 60_000).toISOString();
-      ins.run(
-        `alm_soft_${task.id}_${offset}`,
+      const trigger = new Date(baseMs - offset * 60_000);
+      if (!Number.isFinite(trigger.valueOf())) continue;
+      const defaultId = `alm_soft_${task.id}_${offset}`;
+      const existing = existingReminder.get(task.id, offset, defaultId) as { id: string } | undefined;
+      upsertReminder.run(
+        { $rearm: Number(!!options?.reopen) },
+        existing?.id ?? defaultId,
         task.id,
         calId,
         `Reminder: ${task.title} (H-${offset}m)`,
         `${task.space_name} · ${task.priority.toUpperCase()}`,
-        triggerIso,
+        trigger.toISOString(),
         offset,
       );
     }
   }
 
-  // Re-arm Hard Alarm (FR-61 Tier 2)
   const hardId = `alm_hard_${task.id}`;
   if (task.hard_alarm_enabled) {
     const hardTime = task.hard_alarm_at ?? anchorStart;
@@ -173,13 +194,18 @@ export function syncTaskToCalendarAndAlarms(taskId: string): void {
       `INSERT INTO task_alarms_reminders (id, task_id, calendar_event_id, title, subtitle, kind, trigger_at, offset_minutes, sound_preset, ring_phone_nectarlink, enabled, status)
        VALUES (?, ?, ?, ?, ?, 'hard_alarm', ?, 0, 'tactical_pulse', 1, 1, 'armed')
        ON CONFLICT(id) DO UPDATE SET
-         title = excluded.title,
-         trigger_at = excluded.trigger_at,
-         enabled = 1,
-         status = CASE WHEN task_alarms_reminders.status = 'ringing' THEN 'ringing' ELSE 'armed' END`,
-    ).run(hardId, task.id, calId, task.title, `Hard Alarm · ${task.space_name}`, hardTime);
+         title = CASE WHEN task_alarms_reminders.subtitle = 'Hard Alarm Tugas ClickUp'
+           THEN task_alarms_reminders.title ELSE excluded.title END,
+         calendar_event_id = excluded.calendar_event_id,
+         ${updateTiming}`,
+    ).run({ $rearm: Number(!!(options?.reopen || options?.enableHardAlarm)) },
+      hardId, task.id, calId, task.title, `Hard Alarm · ${task.space_name}`, hardTime);
+
   } else {
-    db.prepare('DELETE FROM task_alarms_reminders WHERE id = ?').run(hardId);
+    db.prepare(
+      `UPDATE task_alarms_reminders SET enabled = 0, status = 'dismissed', snoozed_until = NULL
+       WHERE id = ? AND enabled = 1`,
+    ).run(hardId);
   }
 
   sseBus.emit('alarm:update', { taskId: task.id });
@@ -194,26 +220,41 @@ export function moveCalendarEvent(eventId: string, newStartAt: string, newEndAt?
   const ev = db.prepare('SELECT * FROM calendar_events WHERE id = ?').get(eventId) as unknown as CalendarEventRow | undefined;
   if (!ev) return null;
 
-  db.prepare("UPDATE calendar_events SET start_at = ?, end_at = ?, synced_at = datetime('now') WHERE id = ?").run(
-    newStartAt,
-    newEndAt ?? ev.end_at,
-    eventId,
-  );
+  const endAt = newEndAt ?? shiftCalendarEnd(ev.start_at, ev.end_at, newStartAt);
+  db.exec('SAVEPOINT move_calendar_event');
+  try {
+    db.prepare("UPDATE calendar_events SET start_at = ?, end_at = ?, synced_at = datetime('now') WHERE id = ?").run(
+      newStartAt, endAt, eventId,
+    );
 
-  if (ev.linked_task_id) {
-    db.prepare(
-      `UPDATE tasks
-       SET start_at = ?,
-           due_at = COALESCE(?, due_at),
-           auto_scheduled_block_start = CASE WHEN auto_scheduled_block_start IS NOT NULL THEN ? ELSE NULL END,
+    if (ev.linked_task_id) {
+      // A focus block is a calendar projection. Moving one preserves the task's deadline.
+      db.prepare(
+        `UPDATE tasks SET
+           start_at = CASE WHEN auto_scheduled_block_start IS NULL THEN ? ELSE start_at END,
+           due_at = CASE WHEN auto_scheduled_block_start IS NULL AND (due_at IS NOT NULL OR ? IS NOT NULL) THEN ? ELSE due_at END,
+           auto_scheduled_block_end = CASE WHEN auto_scheduled_block_start IS NOT NULL THEN ? ELSE auto_scheduled_block_end END,
+           auto_scheduled_block_start = CASE WHEN auto_scheduled_block_start IS NOT NULL THEN ? END,
            hard_alarm_at = CASE WHEN hard_alarm_enabled = 1 THEN ? ELSE hard_alarm_at END,
            updated_at = datetime('now')
-       WHERE id = ?`,
-    ).run(newStartAt, newEndAt ?? null, newStartAt, newStartAt, ev.linked_task_id);
-    syncTaskToCalendarAndAlarms(ev.linked_task_id);
-    sseBus.emit('workspace:update', { taskId: ev.linked_task_id });
+         WHERE id = ?`,
+      ).run(newStartAt, newEndAt ?? null, endAt, endAt, newStartAt, newStartAt, ev.linked_task_id);
+      syncTaskToCalendarAndAlarms(ev.linked_task_id);
+    } else {
+      db.prepare(
+        `UPDATE task_alarms_reminders
+         SET trigger_at = ?, status = CASE WHEN enabled = 1 THEN 'armed' ELSE status END, snoozed_until = NULL
+         WHERE calendar_event_id = ? AND kind = 'hard_alarm' AND julianday(trigger_at) IS NOT julianday(?)`,
+      ).run(newStartAt, eventId, newStartAt);
+    }
+    db.exec('RELEASE move_calendar_event');
+  } catch (error) {
+    db.exec('ROLLBACK TO move_calendar_event; RELEASE move_calendar_event');
+    throw error;
   }
 
+  if (ev.linked_task_id) sseBus.emit('workspace:update', { taskId: ev.linked_task_id });
+  sseBus.emit('calendar:update', { eventId });
   return db.prepare('SELECT * FROM calendar_events WHERE id = ?').get(eventId) as unknown as CalendarEventRow;
 }
 
@@ -225,6 +266,7 @@ export function createStandaloneCalendarEvent(params: {
   color?: string;
   notes?: string;
   withHardAlarm?: boolean;
+  ringPhone?: boolean;
 }): CalendarEventRow {
   const db = getDb();
   const id = `cal_${crypto.randomUUID().slice(0, 8)}`;
@@ -245,8 +287,8 @@ export function createStandaloneCalendarEvent(params: {
   if (params.withHardAlarm) {
     db.prepare(
       `INSERT INTO task_alarms_reminders (id, calendar_event_id, title, subtitle, kind, trigger_at, offset_minutes, sound_preset, ring_phone_nectarlink, enabled, status)
-       VALUES (?, ?, ?, ?, 'hard_alarm', ?, 0, 'tactical_pulse', 1, 1, 'armed')`,
-    ).run(`alm_cal_${id}`, id, params.title, 'Kalender Hard Alarm', params.startAt);
+       VALUES (?, ?, ?, ?, 'hard_alarm', ?, 0, 'tactical_pulse', ?, 1, 'armed')`,
+    ).run(`alm_cal_${id}`, id, params.title, 'Kalender Hard Alarm', params.startAt, params.ringPhone === false ? 0 : 1);
   }
   sseBus.emit('alarm:update', { calendarEventId: id });
   return db.prepare('SELECT * FROM calendar_events WHERE id = ?').get(id) as unknown as CalendarEventRow;
@@ -266,6 +308,7 @@ export function createOrUpdateHardAlarm(params: {
      VALUES (?, ?, ?, ?, 'hard_alarm', ?, 0, ?, ?, 1, 'armed')
      ON CONFLICT(id) DO UPDATE SET
        title = excluded.title,
+       subtitle = excluded.subtitle,
        trigger_at = excluded.trigger_at,
        sound_preset = excluded.sound_preset,
        ring_phone_nectarlink = excluded.ring_phone_nectarlink,
@@ -299,38 +342,52 @@ export function toggleAlarmEnabled(alarmId: string, enabled: boolean): AlarmRemi
   const alarm = db.prepare('SELECT * FROM task_alarms_reminders WHERE id = ?').get(alarmId) as unknown as AlarmReminderRow | undefined;
   if (!alarm) return null;
 
-  db.prepare("UPDATE task_alarms_reminders SET enabled = ?, status = CASE WHEN ? = 1 THEN 'armed' ELSE 'dismissed' END WHERE id = ?").run(
+  db.prepare("UPDATE task_alarms_reminders SET enabled = ?, status = CASE WHEN ? = 1 THEN 'armed' ELSE 'dismissed' END, snoozed_until = NULL WHERE id = ?").run(
     enabled ? 1 : 0,
     enabled ? 1 : 0,
     alarmId,
   );
-  if (alarm.task_id && alarm.kind === 'hard_alarm') {
-    db.prepare('UPDATE tasks SET hard_alarm_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, alarm.task_id);
+  if (alarm.kind === 'hard_alarm') {
+    if (alarm.task_id) {
+      db.prepare('UPDATE tasks SET hard_alarm_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, alarm.task_id);
+    }
+    if (alarm.calendar_event_id) {
+      db.prepare('UPDATE calendar_events SET has_hard_alarm = ? WHERE id = ?').run(enabled ? 1 : 0, alarm.calendar_event_id);
+    }
   }
   const updated = db.prepare('SELECT * FROM task_alarms_reminders WHERE id = ?').get(alarmId) as unknown as AlarmReminderRow;
   sseBus.emit('alarm:update', updated);
   return updated;
 }
 
-export async function triggerAlarmNow(alarm: AlarmReminderRow): Promise<void> {
-  const db = getDb();
-  const nowIso = new Date().toISOString();
+const dueAlarmCondition = `enabled = 1 AND (
+  (status = 'armed' AND julianday(trigger_at) <= julianday(?))
+  OR (status = 'snoozed' AND julianday(snoozed_until) <= julianday(?))
+)`;
+
+async function triggerDueAlarm(alarmId: string, nowIso: string): Promise<AlarmReminderRow | null> {
+  const alarm = getDb().prepare(
+    `UPDATE task_alarms_reminders
+     SET status = CASE kind WHEN 'hard_alarm' THEN 'ringing' ELSE 'completed' END,
+         snoozed_until = NULL, last_triggered_at = ?
+     WHERE id = ? AND ${dueAlarmCondition}
+     RETURNING *`,
+  ).get(nowIso, alarmId, nowIso, nowIso) as unknown as AlarmReminderRow | undefined;
+  if (!alarm) return null;
+
   if (alarm.kind === 'hard_alarm') {
-    db.prepare("UPDATE task_alarms_reminders SET status = 'ringing', last_triggered_at = ? WHERE id = ?").run(nowIso, alarm.id);
-    const updated = db.prepare('SELECT * FROM task_alarms_reminders WHERE id = ?').get(alarm.id) as unknown as AlarmReminderRow;
-    sseBus.emit('alarm:ring', updated);
+    sseBus.emit('alarm:ring', alarm);
     if (alarm.ring_phone_nectarlink) {
       await pushPhoneNotification({ title: `⏰ ALARM: ${alarm.title}`, body: alarm.subtitle ?? 'Waktunya eksekusi tugas di Llamrei!' });
       await ringPhone();
     }
   } else {
-    db.prepare("UPDATE task_alarms_reminders SET status = 'completed', last_triggered_at = ? WHERE id = ?").run(nowIso, alarm.id);
-    const updated = db.prepare('SELECT * FROM task_alarms_reminders WHERE id = ?').get(alarm.id) as unknown as AlarmReminderRow;
-    sseBus.emit('alarm:soft_reminder', updated);
+    sseBus.emit('alarm:soft_reminder', alarm);
     if (alarm.ring_phone_nectarlink) {
       await pushPhoneNotification({ title: `🔔 ${alarm.title}`, body: alarm.subtitle ?? 'Pengingat tugas Llamrei' });
     }
   }
+  return alarm;
 }
 
 export async function testHardAlarm(alarmId?: string): Promise<AlarmReminderRow> {
@@ -394,18 +451,14 @@ export function dismissAlarm(
 }
 
 export async function processDueAlarmsTick(now = new Date()): Promise<AlarmReminderRow[]> {
-  const db = getDb();
   const nowIso = now.toISOString();
-  const due = db
-    .prepare(
-      `SELECT * FROM task_alarms_reminders
-       WHERE enabled = 1
-         AND ((status = 'armed' AND trigger_at <= ?) OR (status = 'snoozed' AND snoozed_until <= ?))`,
-    )
-    .all(nowIso, nowIso) as unknown as AlarmReminderRow[];
-
-  for (const item of due) {
-    await triggerAlarmNow(item);
+  const due = getDb()
+    .prepare(`SELECT id FROM task_alarms_reminders WHERE ${dueAlarmCondition}`)
+    .all(nowIso, nowIso) as { id: string }[];
+  const triggered: AlarmReminderRow[] = [];
+  for (const { id } of due) {
+    const alarm = await triggerDueAlarm(id, nowIso);
+    if (alarm) triggered.push(alarm);
   }
-  return due;
+  return triggered;
 }

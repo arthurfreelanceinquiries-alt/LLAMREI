@@ -222,7 +222,7 @@ test('Life OS Tilt Guard, Auto-Scheduler conflict avoidance, Market WIB & Tailsc
     const kpis = getRealDataKpis();
     assert.ok(kpis.totalTasks >= 1);
 
-    const schedule = computeAutoScheduleForToday(false);
+    const schedule = computeAutoScheduleForToday(false, new Date(wibOffsetIso(0, 8, 0)));
     assert.ok(schedule.proposals.length >= 1);
     for (const p of schedule.proposals) {
       const s = Date.parse(p.blockStart);

@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { usePendingAction } from '../../lib/use-pending-action';
+import { Control } from '../ui/Control';
 import type { MacroGoal } from '../../types/llamrei';
 
 interface AutoProposal {
@@ -18,7 +20,7 @@ interface Props {
     summaryAdvice: string;
   };
   onCreateGoal: (input: { title: string; category: MacroGoal['category']; targetMetricLabel?: string }) => Promise<void>;
-  onComputeAutoSchedule: (apply: boolean) => Promise<{
+  onComputeAutoSchedule: (apply: boolean, expected?: AutoProposal[]) => Promise<{
     proposals: AutoProposal[];
     blockedWindows: Array<{ label: string }>;
   }>;
@@ -32,18 +34,21 @@ export function GoalsAndLifeOsView({ goals, bottlenecks, onCreateGoal, onCompute
   const [blockedNotes, setBlockedNotes] = useState<string[]>([]);
   const [appliedNote, setAppliedNote] = useState<string | null>(null);
 
-  const previewAutoSchedule = async () => {
+  const schedule = usePendingAction();
+
+  const previewAutoSchedule = () => schedule.run('preview', async () => {
     const res = await onComputeAutoSchedule(false);
     setProposals(res.proposals);
-    setBlockedNotes(res.blockedWindows.map((b) => b.label));
+    setBlockedNotes(res.blockedWindows.map((window) => window.label));
     setAppliedNote(null);
-  };
+  }, 'Pratinjau jadwal belum tersedia. Coba lagi.');
 
-  const applyAutoSchedule = async () => {
-    const res = await onComputeAutoSchedule(true);
+  const applyAutoSchedule = () => schedule.run('apply', async () => {
+    if (!proposals?.length) return;
+    const res = await onComputeAutoSchedule(true, proposals);
     setProposals(res.proposals);
-    setAppliedNote(`${res.proposals.length} blok tugas berhasil diterapkan ke Kalender Website & Reminder!`);
-  };
+    setAppliedNote(`${res.proposals.length} blok tugas diterapkan ke kalender.`);
+  }, 'Jadwal belum diterapkan. Periksa koneksi dan buat pratinjau baru.');
 
   return (
     <div className="space-y-3">
@@ -54,30 +59,24 @@ export function GoalsAndLifeOsView({ goals, bottlenecks, onCreateGoal, onCompute
           </div>
           <h1 className="text-sm font-bold">Arsitektur Tujuan & Evaluasi Performa Nyata</h1>
         </div>
-        <button
-          onClick={() => void previewAutoSchedule()}
-          className="px-3 py-1.5 rounded text-xs font-mono-num font-bold cursor-pointer"
-          style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
-        >
-          ⚡ Preview Auto-Schedule Hari Ini
-        </button>
+        <Control className="ds-control--primary" disabled={!!schedule.pending} onClick={() => void previewAutoSchedule()}>
+          {schedule.pending === 'preview' ? 'Memuat…' : 'Pratinjau jadwal hari ini'}
+        </Control>
       </div>
 
       {/* Motion-Style Energy & Market-Aware Auto-Scheduler */}
+      {schedule.error && <p role="alert" className="ds-note">{schedule.error}</p>}
       {proposals && (
         <div className="themed-card p-3 space-y-2 text-xs" style={{ borderColor: 'var(--border-accent)' }}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="font-mono-num font-bold" style={{ color: 'var(--accent)' }}>
               USULAN BLOK DEEP WORK HARI INI ({proposals.length} TUGAS)
             </span>
-            <button
-              onClick={() => void applyAutoSchedule()}
-              className="px-3 py-1 rounded font-mono-num font-bold cursor-pointer"
-              style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
-            >
-              ✓ Terapkan ke Kalender & Reminder
-            </button>
+            <Control className="ds-control--outline" disabled={!!schedule.pending || !proposals.length || !!appliedNote} onClick={() => void applyAutoSchedule()}>
+              {schedule.pending === 'apply' ? 'Menyimpan…' : 'Terapkan ke kalender'}
+            </Control>
           </div>
+          {!proposals.length && <p className="text-sm text-[var(--text-secondary)]">Belum ada blok yang tersedia hari ini.</p>}
           {blockedNotes.length > 0 && (
             <div style={{ color: 'var(--text-muted)' }}>
               Otomatis menghindari: {blockedNotes.join(' · ')}

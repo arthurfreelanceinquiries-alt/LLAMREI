@@ -1,4 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  AlarmClock,
+  ArrowRight,
+  CalendarDays,
+  ClipboardCheck,
+  CheckCircle2,
+  ChevronRight,
+  CircleCheckBig,
+  Clock3,
+  ListTodo,
+  Moon,
+  Newspaper,
+  RefreshCw,
+  Sparkles,
+  TrendingUp,
+} from 'lucide-react';
+import { alarmStatusLabels, alarmTime, isActiveAlarm } from '../../lib/alarm-state';
+import { usePendingAction } from '../../lib/use-pending-action';
+import type { CalendarTarget } from '../alarms/CalendarAndAlarmView';
+import { useTheme } from '../../theme/ThemeContext';
 import type {
   AlarmReminderItem,
   CalendarEventItem,
@@ -20,23 +40,63 @@ interface Props {
   news: NewsArticleItem[];
   economicEvents: EconomicEventItem[];
   watchlistSymbol: string;
+  pendingApprovalCount: number;
   onSelectWatchlistSymbol: (sym: string) => void;
   onSaveCheckIn: (input: { sleepHours: number; energyLevel: number; mentalState: DailyCheckInItem['mental_state'] }) => Promise<void>;
   onToggleHabit: (habitId: string, completed: boolean) => Promise<void>;
   onCycleTaskStatus: (task: TaskItem) => Promise<void>;
   onOpenTask: (task: TaskItem) => void;
+  onOpenCalendarTarget: (target: CalendarTarget) => void;
+  onOpenCopilot: () => void;
   onNavigateTab: (tab: NavTab) => void;
   onAskLlamreiWithContext: (prompt: string, context: Record<string, unknown>) => void;
   onAutoSchedule: () => void;
   onRefreshMarket: () => Promise<void>;
 }
 
-const WATCHLIST = [
-  { symbol: 'OANDA:XAUUSD', label: 'XAU/USD', price: '2,642.80', delta: '+0.64%', up: true },
-  { symbol: 'FX:EURUSD', label: 'EUR/USD', price: '1.0584', delta: '-0.18%', up: false },
-  { symbol: 'BINANCE:BTCUSDT', label: 'BTC/USDT', price: '94,120', delta: '+1.85%', up: true },
-  { symbol: 'TVC:DXY', label: 'DXY', price: '106.24', delta: '+0.12%', up: true },
+const watchlist = [
+  { symbol: 'OANDA:XAUUSD', label: 'XAU/USD' },
+  { symbol: 'FX:EURUSD', label: 'EUR/USD' },
+  { symbol: 'BINANCE:BTCUSDT', label: 'BTC/USDT' },
+  { symbol: 'TVC:DXY', label: 'DXY' },
 ];
+
+const priorities = {
+  urgent: { rank: 0, label: 'Mendesak', color: 'var(--danger, var(--accent))' },
+  high: { rank: 1, label: 'Tinggi', color: 'var(--warning, var(--accent))' },
+  normal: { rank: 2, label: 'Normal', color: 'var(--text-secondary)' },
+  low: { rank: 3, label: 'Rendah', color: 'var(--text-secondary)' },
+};
+
+const riskLabels = { high: 'Tinggi', moderate: 'Sedang', low: 'Rendah' };
+
+const weekday = new Intl.DateTimeFormat('id-ID', {
+  timeZone: 'Asia/Jakarta',
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+});
+const dayAndTime = new Intl.DateTimeFormat('id-ID', {
+  timeZone: 'Asia/Jakarta',
+  day: 'numeric',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+const number = new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 });
+
+const card = 'min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-4 sm:p-5';
+const sectionTitle = 'flex min-w-0 items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]';
+const supportingText = 'text-sm leading-relaxed text-[var(--text-secondary)]';
+const sectionAction = 'inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-sm font-medium text-[var(--accent)] hover:bg-[var(--accent-soft)]';
+const control = 'min-h-11 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 text-sm text-[var(--text-primary)]';
+const rowBorder = 'border-t border-[var(--border-subtle)] first:border-t-0';
+
+function dateLabel(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? 'Waktu belum tersedia' : `${dayAndTime.format(date)} WIB`;
+}
 
 export function MorningBentoView({
   kpis,
@@ -47,27 +107,33 @@ export function MorningBentoView({
   news,
   economicEvents,
   watchlistSymbol,
+  pendingApprovalCount,
   onSelectWatchlistSymbol,
   onSaveCheckIn,
   onToggleHabit,
   onCycleTaskStatus,
   onOpenTask,
+  onOpenCalendarTarget,
+  onOpenCopilot,
   onNavigateTab,
   onAskLlamreiWithContext,
   onAutoSchedule,
   onRefreshMarket,
 }: Props) {
+  const { theme } = useTheme();
+  const action = usePendingAction();
   const [sleepHours, setSleepHours] = useState(kpis.todayCheckIn?.sleep_hours ?? 7);
   const [energyLevel, setEnergyLevel] = useState(kpis.todayCheckIn?.energy_level ?? 4);
   const [mentalState, setMentalState] = useState<DailyCheckInItem['mental_state']>(kpis.todayCheckIn?.mental_state ?? 'focused');
-  const tvContainerRef = useRef<HTMLDivElement | null>(null);
-  const [tvOfflineFallback, setTvOfflineFallback] = useState(false);
+  const [checkInStatus, setCheckInStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [marketStatus, setMarketStatus] = useState<'idle' | 'refreshing' | 'error'>('idle');
+  const tvContainerRef = useRef<HTMLDivElement>(null);
+  const [chartState, setChartState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
 
   useEffect(() => {
-    const el = tvContainerRef.current;
-    if (!el) return;
-    el.innerHTML = '';
-    setTvOfflineFallback(false);
+    const container = tvContainerRef.current;
+    if (!container) return;
+    setChartState('loading');
 
     const script = document.createElement('script');
     script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js';
@@ -79,413 +145,396 @@ export function MorningBentoView({
       height: 170,
       locale: 'id',
       dateRange: '1D',
-      colorTheme: 'dark',
+      colorTheme: document.documentElement.dataset.theme === 'light' ? 'light' : 'dark',
       isTransparent: true,
       autosize: false,
       largeChartUrl: '',
     });
-    script.onerror = () => setTvOfflineFallback(true);
-    el.appendChild(script);
-  }, [watchlistSymbol]);
+    const observer = new MutationObserver(() => {
+      const frame = container.querySelector('iframe');
+      if (frame) {
+        frame.title = `Grafik TradingView ${watchlistSymbol}`;
+        setChartState('ready');
+      }
+    });
+    observer.observe(container, { childList: true, subtree: true });
+    const timeout = window.setTimeout(() => {
+      if (!container.querySelector('iframe')) setChartState('unavailable');
+    }, 6000);
+    script.onerror = () => setChartState('unavailable');
+    container.replaceChildren(script);
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(timeout);
+      script.onerror = null;
+      container.replaceChildren();
+    };
+  }, [theme, watchlistSymbol]);
 
-  const openTasks = tasks.filter((t) => !t.parent_task_id && t.status !== 'Done').slice(0, 4);
-  const nextHardAlarm = alarms.find((a) => a.kind === 'hard_alarm' && a.enabled === 1 && a.status !== 'dismissed');
-  const pendingChats = scheduledMessages.filter((m) => m.status === 'pending_approval' || m.status === 'approved').slice(0, 2);
+  const now = Date.now();
+  const openTasks = tasks
+    .filter((task) => !task.parent_task_id && task.status !== 'Done')
+    .sort((a, b) => priorities[a.priority].rank - priorities[b.priority].rank)
+    .slice(0, 4);
+  const hardAlarms = alarms.filter((alarm) => alarm.kind === 'hard_alarm' && isActiveAlarm(alarm));
+  const nextHardAlarm = hardAlarms.find((alarm) => alarm.status === 'ringing') ??
+    hardAlarms.sort((left, right) => Date.parse(alarmTime(left)) - Date.parse(alarmTime(right)))[0];
+  const upcoming = calendarEvents
+    .filter((event) => Date.parse(event.end_at ?? event.start_at) >= now)
+    .sort((a, b) => Date.parse(a.start_at) - Date.parse(b.start_at))
+    .slice(0, 3);
+  const pendingChats = scheduledMessages
+    .filter((message) => message.status === 'pending_approval' || message.status === 'approved')
+    .slice(0, 2);
+  const marketEvents = economicEvents.filter((event) => Date.parse(event.scheduled_at) >= now).slice(0, 2);
+
+  async function saveCheckIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setCheckInStatus('saving');
+    try {
+      await onSaveCheckIn({ sleepHours, energyLevel, mentalState });
+      setCheckInStatus('saved');
+    } catch {
+      setCheckInStatus('error');
+    }
+  }
+
+  async function refreshMarket() {
+    setMarketStatus('refreshing');
+    try {
+      await onRefreshMarket();
+      setMarketStatus('idle');
+    } catch {
+      setMarketStatus('error');
+    }
+  }
 
   return (
-    <div className="space-y-3">
-      {/* Header Row */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
+    <div className="mx-auto grid w-full max-w-[1440px] gap-4 sm:gap-5">
+      <header className="flex flex-wrap items-end justify-between gap-3 sm:gap-4">
         <div>
-          <h1 className="text-sm font-bold tracking-tight flex items-center gap-2">
-            <span>MORNING COMMAND BENTO</span>
-            <span
-              className="text-xs font-mono-num px-1.5 py-0.5 rounded border"
-              style={{ background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--border-accent)' }}
-            >
-              LIFE OS + TRADER
-            </span>
-          </h1>
-          <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-            Satu layar pagi: 10s Check-In, Alarm Tugas, Kalender, ClickUp, Jadwal Chat, Watchlist & CPI/FOMC.
-          </p>
+          <p className="mb-1 text-sm font-medium text-[var(--text-secondary)]">{weekday.format(now)} · WIB</p>
+          <h1 className="text-[28px] leading-tight font-semibold tracking-tight sm:text-[32px]">Hari ini</h1>
         </div>
         <button
+          type="button"
           onClick={onAutoSchedule}
-          className="px-3 py-1.5 rounded text-xs font-mono-num font-bold cursor-pointer"
-          style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
+          className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-fg)] hover:brightness-110"
         >
-          ⚡ Auto-Schedule Hari Ini
+          <Sparkles size={16} aria-hidden />
+          Susun jadwal
         </button>
+      </header>
+
+      {pendingApprovalCount > 0 && (
+        <button type="button" onClick={onOpenCopilot} className="themed-card flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--bg-elevated)]">
+          <ClipboardCheck size={17} aria-hidden="true" className="text-[var(--accent)]" />
+          <span className="flex-1">{pendingApprovalCount} aksi menunggu persetujuan</span>
+          <ArrowRight size={16} aria-hidden="true" />
+        </button>
+      )}
+      {action.error && <p className="ds-note" role="alert">{action.error}</p>}
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4" role="group" aria-label="Ringkasan aktivitas">
+        <section className={card} aria-labelledby="overview-tasks-metric">
+          <h2 id="overview-tasks-metric" className={sectionTitle}><CircleCheckBig size={17} aria-hidden /> Tugas selesai</h2>
+          <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-2xl leading-none font-semibold tabular-nums">{kpis.executionScorePercent}%</span>
+            <span className={supportingText}>{kpis.completedTasks} dari {kpis.totalTasks} tugas</span>
+          </div>
+          <div
+            role="progressbar"
+            aria-label="Persentase tugas selesai"
+            aria-valuenow={kpis.executionScorePercent}
+            className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--bg-elevated)]"
+          >
+            <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${kpis.executionScorePercent}%` }} />
+          </div>
+        </section>
+
+        <section className={card} aria-labelledby="overview-focus-metric">
+          <h2 id="overview-focus-metric" className={sectionTitle}><Clock3 size={17} aria-hidden /> Waktu fokus</h2>
+          <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-2xl leading-none font-semibold tabular-nums">{number.format(kpis.deepWorkHoursTotal)}</span>
+            <span className={supportingText}>jam tercatat</span>
+          </div>
+        </section>
+
+        <section className={card} aria-labelledby="overview-habit-metric">
+          <h2 id="overview-habit-metric" className={sectionTitle}><CheckCircle2 size={17} aria-hidden /> Kebiasaan</h2>
+          <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-2xl leading-none font-semibold tabular-nums">{kpis.habitCompletionPercent}%</span>
+            <span className={supportingText}>selesai hari ini</span>
+          </div>
+        </section>
       </div>
 
-      {/* 10-Second Morning Check-In & Trader Tilt Guard (FR-47) */}
-      <div className="themed-card p-3 space-y-2.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono-num font-bold" style={{ color: 'var(--accent)' }}>
-              10-SECOND MORNING CHECK-IN & TILT GUARD
-            </span>
-            {kpis.todayCheckIn && (
-              <span
-                className="text-xs font-mono-num px-2 py-0.5 rounded border font-bold"
-                style={{
-                  background:
-                    kpis.todayCheckIn.tilt_risk_level === 'high'
-                      ? 'rgba(239,68,68,0.18)'
-                      : kpis.todayCheckIn.tilt_risk_level === 'moderate'
-                        ? 'rgba(245,158,11,0.18)'
-                        : 'var(--accent-soft)',
-                  borderColor:
-                    kpis.todayCheckIn.tilt_risk_level === 'high'
-                      ? 'rgba(239,68,68,0.5)'
-                      : kpis.todayCheckIn.tilt_risk_level === 'moderate'
-                        ? 'rgba(245,158,11,0.5)'
-                        : 'var(--border-accent)',
-                  color:
-                    kpis.todayCheckIn.tilt_risk_level === 'high'
-                      ? '#f87171'
-                      : kpis.todayCheckIn.tilt_risk_level === 'moderate'
-                        ? '#fbbf24'
-                        : 'var(--accent)',
-                }}
-              >
-                RISK: {kpis.todayCheckIn.tilt_risk_level.toUpperCase()}
-              </span>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <label className="flex items-center gap-1 font-mono-num">
-              <span style={{ color: 'var(--text-muted)' }}>Tidur:</span>
-              <input
-                type="number"
-                step="0.5"
-                min="2"
-                max="12"
-                value={sleepHours}
-                onChange={(e) => setSleepHours(Number(e.target.value))}
-                className="w-14 px-1.5 py-0.5 rounded border text-center"
-                style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-              />
-              <span>jam</span>
-            </label>
-
-            <div className="flex items-center gap-1">
-              <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                Energi:
-              </span>
-              {[1, 2, 3, 4, 5].map((lvl) => (
-                <button
-                  key={lvl}
-                  onClick={() => setEnergyLevel(lvl)}
-                  className="px-1.5 py-0.5 rounded text-xs font-mono-num border cursor-pointer"
-                  style={
-                    energyLevel === lvl
-                      ? { background: 'var(--accent)', color: 'var(--accent-fg)', borderColor: 'var(--accent)' }
-                      : { background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }
-                  }
-                >
-                  {lvl}⚡
-                </button>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+        <section className={card} aria-labelledby="overview-priorities">
+          <header className="flex flex-wrap items-center justify-between gap-x-2">
+            <h2 id="overview-priorities" className={sectionTitle}><ListTodo size={17} aria-hidden /> Tugas prioritas</h2>
+            <button type="button" className={sectionAction} onClick={() => onNavigateTab('clickup')}>
+              Semua tugas <ArrowRight size={15} aria-hidden />
+            </button>
+          </header>
+          {openTasks.length > 0 ? (
+            <ul className="mt-1">
+              {openTasks.map((task) => (
+                <li key={task.id} className={`${rowBorder} grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 py-2`}>
+                  <div className="min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => onOpenTask(task)}
+                      className="flex min-h-8 cursor-pointer items-center gap-1.5 rounded text-left text-sm leading-snug font-medium hover:text-[var(--accent)]"
+                    >
+                      {task.title}
+                      {task.hard_alarm_enabled === 1 && <AlarmClock size={14} className="shrink-0" role="img" aria-label="Alarm aktif" />}
+                    </button>
+                    <div className="flex flex-wrap items-center gap-x-2">
+                      <span className="text-xs font-medium" style={{ color: priorities[task.priority].color }}>{priorities[task.priority].label}</span>
+                      <button
+                        type="button"
+                        disabled={!!action.pending}
+                        onClick={() => void action.run(task.id, () => onCycleTaskStatus(task), 'Status tugas belum dapat diperbarui.')}
+                        aria-label={`Ubah status ${task.title}, saat ini ${task.status}`}
+                        className="inline-flex min-h-8 cursor-pointer items-center gap-0.5 rounded px-1 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
+                      >
+                        {task.status} <ChevronRight size={12} aria-hidden />
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onAskLlamreiWithContext(`Bantu pecah atau jadwalkan tindak lanjut tugas: ${task.title}`, task as unknown as Record<string, unknown>)}
+                    aria-label={`Tanya Llamrei tentang ${task.title}`}
+                    className={sectionAction}
+                  >
+                    <Sparkles size={15} aria-hidden /> Tanya
+                  </button>
+                </li>
               ))}
-            </div>
+            </ul>
+          ) : <p className={supportingText}>Tidak ada tugas yang perlu dikerjakan.</p>}
+        </section>
 
+        <section className={card} aria-labelledby="overview-agenda">
+          <header className="flex flex-wrap items-center justify-between gap-x-2">
+            <h2 id="overview-agenda" className={sectionTitle}><CalendarDays size={17} aria-hidden /> Agenda mendatang</h2>
+            <button type="button" className={sectionAction} onClick={() => onNavigateTab('calendar')}>
+              Kalender <ArrowRight size={15} aria-hidden />
+            </button>
+          </header>
+          {nextHardAlarm && (
+            <button type="button" onClick={() => onOpenCalendarTarget({ kind: 'alarm', id: nextHardAlarm.id })} className="my-2 flex w-full min-w-0 items-start gap-2 rounded-lg bg-[var(--bg-elevated)] px-3 py-2.5 text-left text-sm">
+              <AlarmClock size={17} className="mt-0.5 shrink-0 text-[var(--warning)]" aria-hidden="true" />
+              <span className="grid min-w-0 flex-1 gap-1 [overflow-wrap:anywhere]">
+                <span className="font-medium">{alarmStatusLabels[nextHardAlarm.status]} · {nextHardAlarm.title}</span>
+                <span className="text-xs text-[var(--text-secondary)]">{dateLabel(alarmTime(nextHardAlarm))}</span>
+              </span>
+              <ChevronRight size={16} aria-hidden="true" />
+            </button>
+          )}
+          {upcoming.length > 0 ? (
+            <ul>
+              {upcoming.map((event) => (
+                <li key={event.id} className={rowBorder}>
+                  <button type="button" onClick={() => onOpenCalendarTarget({ kind: 'event', id: event.id })} className="flex min-h-11 w-full min-w-0 items-start gap-2 rounded-md px-1 py-2 text-left text-sm hover:bg-[var(--bg-elevated)]">
+                    <span className="mt-1.5 size-2 shrink-0 rounded-full" style={{ background: event.color }} aria-hidden="true" />
+                    <span className="grid min-w-0 flex-1 gap-1 [overflow-wrap:anywhere]">
+                      <span className="font-medium">{event.title}</span>
+                      <span className="text-xs text-[var(--text-secondary)]">{dateLabel(event.start_at)}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className={supportingText}>Belum ada kegiatan mendatang.</p>}
+          {pendingChats.length > 0 && (
+            <ul className="mt-2 border-t border-[var(--border-subtle)] pt-1">
+              {pendingChats.map((message) => (
+                <li key={message.id}>
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab('scheduler')}
+                    className="flex min-h-11 w-full cursor-pointer items-start justify-between gap-2 rounded px-1 py-2 text-left text-sm hover:bg-[var(--bg-elevated)]"
+                  >
+                    <span className="min-w-0">{message.recipient_name} · {message.purpose || 'Pesan terjadwal'}</span>
+                    <span className="shrink-0 text-right text-xs text-[var(--text-secondary)]">
+                      {message.status === 'pending_approval' ? 'Perlu persetujuan' : 'Disetujui'}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      <section className={card} aria-labelledby="overview-checkin">
+        <header className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="overview-checkin" className={sectionTitle}><Moon size={17} aria-hidden /> Cek pagi</h2>
+          {kpis.todayCheckIn && (
+            <span className="rounded-md bg-[var(--bg-elevated)] px-2.5 py-1 text-xs font-medium text-[var(--text-secondary)]">
+              Risiko tilt {riskLabels[kpis.todayCheckIn.tilt_risk_level].toLowerCase()}
+            </span>
+          )}
+        </header>
+        <form className="mt-3 flex flex-wrap items-end gap-3" onSubmit={(event) => void saveCheckIn(event)}>
+          <label className="grid gap-1 text-sm text-[var(--text-secondary)]">
+            Tidur (jam)
+            <input
+              className={`${control} w-24`}
+              type="number"
+              step="0.5"
+              min="2"
+              max="12"
+              required
+              value={Number.isNaN(sleepHours) ? '' : sleepHours}
+              onChange={(event) => setSleepHours(event.target.valueAsNumber)}
+            />
+          </label>
+          <fieldset className="flex flex-wrap gap-1">
+            <legend className="mb-1 text-sm text-[var(--text-secondary)]">Energi</legend>
+            {[1, 2, 3, 4, 5].map((level) => (
+              <button
+                key={level}
+                type="button"
+                onClick={() => setEnergyLevel(level)}
+                aria-pressed={energyLevel === level}
+                className={`${control} min-w-11 cursor-pointer hover:bg-[var(--accent-soft)]`}
+                style={energyLevel === level ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
+              >
+                {level}
+              </button>
+            ))}
+          </fieldset>
+          <label className="grid gap-1 text-sm text-[var(--text-secondary)]">
+            Kondisi
             <select
               value={mentalState}
-              onChange={(e) => setMentalState(e.target.value as DailyCheckInItem['mental_state'])}
-              className="px-2 py-0.5 rounded border text-xs"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
+              onChange={(event) => setMentalState(event.target.value as DailyCheckInItem['mental_state'])}
+              className={control}
             >
-              <option value="focused">Focused</option>
-              <option value="calm">Calm</option>
-              <option value="rushed">Rushed</option>
-              <option value="tilted">Tilted</option>
-              <option value="exhausted">Exhausted</option>
+              <option value="focused">Fokus</option>
+              <option value="calm">Tenang</option>
+              <option value="rushed">Terburu-buru</option>
+              <option value="tilted">Tidak stabil</option>
+              <option value="exhausted">Lelah</option>
             </select>
+          </label>
+          <button type="submit" disabled={checkInStatus === 'saving'} className={`${sectionAction} px-3`}>
+            {checkInStatus === 'saving' ? 'Menyimpan…' : 'Simpan cek pagi'}
+          </button>
+        </form>
+        {checkInStatus === 'error' && <p role="alert" className={`mt-2 ${supportingText}`}>Cek pagi gagal disimpan. Coba lagi.</p>}
+        {checkInStatus === 'saved' && <p role="status" className={`mt-2 ${supportingText}`}>Cek pagi tersimpan.</p>}
+        {kpis.todayCheckIn?.tilt_guard_advice && <p className={`mt-3 ${supportingText}`}>{kpis.todayCheckIn.tilt_guard_advice}</p>}
 
-            <button
-              onClick={() => void onSaveCheckIn({ sleepHours, energyLevel, mentalState })}
-              className="px-2.5 py-0.5 rounded text-xs font-mono-num font-bold cursor-pointer"
-              style={{ background: 'var(--accent-soft)', color: 'var(--accent)', border: '1px solid var(--border-accent)' }}
-            >
-              Simpan Cek Pagi
-            </button>
-          </div>
-        </div>
-
-        {kpis.todayCheckIn?.tilt_guard_advice && (
-          <div className="text-xs px-2.5 py-1.5 rounded bg-black/25 border" style={{ borderColor: 'var(--border-subtle)' }}>
-            {kpis.todayCheckIn.tilt_guard_advice}
+        {kpis.habits.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-2 border-t border-[var(--border-subtle)] pt-3" role="group" aria-label="Tandai kebiasaan">
+            {kpis.habits.map((habit) => (
+              <button
+                key={habit.id}
+                type="button"
+                disabled={!!action.pending}
+                onClick={() => void action.run(habit.id, () => onToggleHabit(habit.id, !habit.completedToday), 'Kebiasaan belum dapat diperbarui.')}
+                aria-pressed={habit.completedToday}
+                className={`${control} inline-flex max-w-full cursor-pointer items-center gap-2 py-1 text-left hover:bg-[var(--accent-soft)]`}
+                style={habit.completedToday ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
+              >
+                {habit.completedToday && <CheckCircle2 size={15} className="shrink-0" aria-hidden />}
+                <span>{habit.title}</span>
+                <span className="shrink-0 text-xs text-[var(--text-secondary)]">{habit.current_streak} hari</span>
+              </button>
+            ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Real-Data KPI & Habit Streak Row (FR-49) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-        <div className="themed-card p-2.5 space-y-1.5">
-          <div className="flex justify-between text-xs font-mono-num">
-            <span style={{ color: 'var(--text-muted)' }}>EXECUTION SCORE</span>
-            <span style={{ color: 'var(--accent)' }}>
-              {kpis.executionScorePercent}% ({kpis.completedTasks}/{kpis.totalTasks})
-            </span>
-          </div>
-          <div className="h-2 rounded-full overflow-hidden bg-black/40">
-            <div className="h-full rounded-full transition-all" style={{ width: `${kpis.executionScorePercent}%`, background: 'var(--accent)' }} />
-          </div>
-        </div>
-
-        <div className="themed-card p-2.5 space-y-1.5">
-          <div className="flex justify-between text-xs font-mono-num">
-            <span style={{ color: 'var(--text-muted)' }}>DEEP WORK LOGGED</span>
-            <span style={{ color: 'var(--accent-2)' }}>{kpis.deepWorkHoursTotal} jam</span>
-          </div>
-          <div className="h-2 rounded-full overflow-hidden bg-black/40">
-            <div
-              className="h-full rounded-full transition-all"
-              style={{ width: `${Math.min(100, Math.round((kpis.deepWorkHoursTotal / 6) * 100))}%`, background: 'var(--accent-2)' }}
-            />
-          </div>
-        </div>
-
-        <div className="themed-card p-2.5 space-y-1">
-          <div className="flex justify-between text-xs font-mono-num">
-            <span style={{ color: 'var(--text-muted)' }}>HABIT STREAKS</span>
-            <span>{kpis.habitCompletionPercent}% hari ini</span>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {kpis.habits.map((h) => (
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <section className={card} aria-labelledby="overview-watchlist">
+          <h2 id="overview-watchlist" className={sectionTitle}><TrendingUp size={17} aria-hidden /> Watchlist</h2>
+          <div className="my-2 flex flex-wrap gap-1.5" role="group" aria-label="Simbol watchlist">
+            {watchlist.map(({ symbol, label }) => (
               <button
-                key={h.id}
-                onClick={() => void onToggleHabit(h.id, !h.completedToday)}
-                className="px-2 py-0.5 rounded text-xs border cursor-pointer"
-                style={
-                  h.completedToday
-                    ? { background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--border-accent)' }
-                    : { background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }
-                }
+                key={symbol}
+                type="button"
+                aria-pressed={watchlistSymbol === symbol}
+                onClick={() => onSelectWatchlistSymbol(symbol)}
+                className={`${control} cursor-pointer font-medium hover:bg-[var(--accent-soft)]`}
+                style={watchlistSymbol === symbol ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
               >
-                {h.completedToday ? '✓' : '□'} {h.title.split(' ')[0]} ({h.current_streak}d)
+                {label}
               </button>
             ))}
           </div>
-        </div>
-      </div>
 
-      {/* TradingView Watchlist + Agenda/Alarm/Chat Summary */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
-        {/* Trader Panel */}
-        <div className="themed-card p-2.5 space-y-2">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-mono-num font-bold" style={{ color: 'var(--text-secondary)' }}>
-              📈 WATCHLIST & CHART TRADINGVIEW
-            </span>
-            <div className="flex gap-1">
-              {WATCHLIST.map((w) => (
-                <button
-                  key={w.symbol}
-                  onClick={() => onSelectWatchlistSymbol(w.symbol)}
-                  className="px-1.5 py-0.5 rounded text-xs font-mono-num border cursor-pointer"
-                  style={
-                    watchlistSymbol === w.symbol
-                      ? { background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--border-accent)' }
-                      : { background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }
-                  }
-                >
-                  {w.label}
-                </button>
-              ))}
-            </div>
+          <div className="relative min-h-[170px] overflow-hidden rounded-lg bg-[var(--bg-elevated)]">
+            <div ref={tvContainerRef} />
+            {chartState !== 'ready' && (
+              <p className={`absolute inset-0 grid place-items-center p-4 text-center ${supportingText}`} role="status">
+                {chartState === 'loading' ? 'Memuat grafik…' : 'Grafik TradingView tidak tersedia.'}
+              </p>
+            )}
           </div>
+          <p className="mt-2 text-xs text-[var(--text-secondary)]">Data dari TradingView · Bukan saran investasi</p>
 
-          <div ref={tvContainerRef} className="min-h-[170px] rounded overflow-hidden bg-black/30" />
-          {tvOfflineFallback && (
-            <div className="text-xs font-mono-num p-2 rounded bg-black/30">
-              Offline/Blocked fallback — {WATCHLIST.map((w) => `${w.label}: ${w.price} (${w.delta})`).join(' · ')}
+          {marketEvents.length > 0 && (
+            <div className="mt-4 border-t border-[var(--border-subtle)] pt-3">
+              <h3 className="mb-1 text-sm font-medium">Kalender ekonomi</h3>
+              <ul>
+                {marketEvents.map((event) => (
+                  <li key={event.id} className={`${rowBorder} py-2 text-sm`}>
+                    <p>{event.event_name}</p>
+                    <p className="mt-0.5 text-xs text-[var(--text-secondary)]">{event.country} · {dateLabel(event.scheduled_at)}</p>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
+        </section>
 
-          <div className="flex items-center justify-between text-xs pt-1 border-t" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}>
-            <span>Powered by TradingView (Atribusi Resmi)</span>
-            <span>Catatan: Bukan saran investasi (FR-43)</span>
-          </div>
-        </div>
-
-        {/* Agenda, Hard Alarm & Scheduled Chats */}
-        <div className="themed-card p-2.5 space-y-2 flex flex-col justify-between">
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-mono-num font-bold" style={{ color: 'var(--text-secondary)' }}>
-                📅 KALENDER, ALARM & JADWAL CHAT
-              </span>
-              <button
-                onClick={() => onNavigateTab('calendar')}
-                className="text-xs font-mono-num hover:underline cursor-pointer"
-                style={{ color: 'var(--accent)' }}
-              >
-                Buka Kalender & Alarm →
-              </button>
-            </div>
-
-            {nextHardAlarm && (
-              <div className="px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-xs flex items-center justify-between">
-                <span className="font-semibold text-amber-300">⏰ Hard Alarm: {nextHardAlarm.title}</span>
-                <span className="font-mono-num text-amber-200">
-                  {new Date(nextHardAlarm.trigger_at).toLocaleTimeString('id-ID', {
-                    timeZone: 'Asia/Jakarta',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}{' '}
-                  WIB
-                </span>
-              </div>
-            )}
-
-            <div className="space-y-1">
-              {calendarEvents.slice(0, 3).map((ev) => (
-                <div
-                  key={ev.id}
-                  className="px-2.5 py-1.5 rounded bg-black/25 text-xs flex items-center justify-between border-l-2"
-                  style={{ borderLeftColor: ev.color }}
-                >
-                  <span className="truncate">{ev.title}</span>
-                  <span className="font-mono-num shrink-0 ml-2" style={{ color: 'var(--text-secondary)' }}>
-                    {new Date(ev.start_at).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-              ))}
-              {pendingChats.map((m) => (
-                <div
-                  key={m.id}
-                  onClick={() => onNavigateTab('scheduler')}
-                  className="px-2.5 py-1.5 rounded bg-black/25 text-xs flex items-center justify-between border-l-2 border-amber-400 cursor-pointer"
-                >
-                  <span className="truncate">💬 Chat → {m.recipient_name}: {m.purpose}</span>
-                  <span className="font-mono-num text-amber-300 shrink-0 ml-2">{m.status === 'pending_approval' ? 'WAIT APPROVE' : 'APPROVED'}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* High Impact Econ Events */}
-          <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--border-subtle)' }}>
-            <div className="text-xs font-mono-num" style={{ color: 'var(--text-muted)' }}>
-              KALENDER EKONOMI (CPI / NFP / FOMC)
-            </div>
-            {economicEvents.slice(0, 2).map((ec) => (
-              <div key={ec.id} className="flex items-center justify-between text-xs bg-black/25 px-2 py-1 rounded">
-                <span className="truncate">
-                  <span className={ec.impact === 'high' ? 'text-rose-400 font-mono-num font-bold mr-1.5' : 'text-amber-400 font-mono-num mr-1.5'}>
-                    [{ec.impact.toUpperCase()} · {ec.country}]
-                  </span>
-                  {ec.event_name}
-                </span>
-                <span className="font-mono-num shrink-0 ml-2" style={{ color: 'var(--text-secondary)' }}>
-                  {new Date(ec.scheduled_at).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' })} WIB
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* ClickUp Priority Tasks Snapshot */}
-      <div className="themed-card p-2.5 space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-mono-num font-bold" style={{ color: 'var(--text-secondary)' }}>
-            🗂️ TUGAS PRIORITAS CLICKUP (TERHUBUNG KE KALENDER & ALARM)
-          </span>
-          <button
-            onClick={() => onNavigateTab('clickup')}
-            className="text-xs font-mono-num hover:underline cursor-pointer"
-            style={{ color: 'var(--accent)' }}
-          >
-            Buka Workspace Penuh →
-          </button>
-        </div>
-
-        <div className="space-y-1.5">
-          {openTasks.map((t) => (
-            <div
-              key={t.id}
-              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded bg-black/25 border"
-              style={{ borderColor: 'var(--border-subtle)' }}
+        <section className={card} aria-labelledby="overview-news">
+          <header className="flex flex-wrap items-center justify-between gap-x-2">
+            <h2 id="overview-news" className={sectionTitle}><Newspaper size={17} aria-hidden /> Berita pasar & AI</h2>
+            <button
+              type="button"
+              onClick={() => void refreshMarket()}
+              disabled={marketStatus === 'refreshing'}
+              className={sectionAction}
             >
-              <div className="flex items-center gap-2 min-w-0">
-                <button
-                  onClick={() => void onCycleTaskStatus(t)}
-                  className="px-2 py-0.5 rounded text-xs font-mono-num border cursor-pointer shrink-0"
-                  style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
-                >
-                  {t.status}
-                </button>
-                <button onClick={() => onOpenTask(t)} className="text-xs font-medium truncate text-left hover:underline cursor-pointer">
-                  {t.title}
-                </button>
-                {t.hard_alarm_enabled === 1 && <span title="Hard Alarm Aktif">⏰</span>}
-              </div>
-
-              <div className="flex items-center gap-1.5 shrink-0">
-                <span
-                  className="px-1.5 py-0.5 rounded text-xs font-mono-num"
-                  style={{
-                    background: t.priority === 'urgent' ? 'rgba(239,68,68,0.18)' : 'rgba(245,158,11,0.16)',
-                    color: t.priority === 'urgent' ? '#f87171' : '#fbbf24',
-                  }}
-                >
-                  {t.priority.toUpperCase()}
-                </span>
-                <button
-                  onClick={() => onAskLlamreiWithContext(`Bantu pecah atau jadwalkan tindak lanjut tugas: ${t.title}`, t as unknown as Record<string, unknown>)}
-                  className="px-2 py-0.5 rounded text-xs font-mono-num border cursor-pointer"
-                  style={{ background: 'var(--accent-soft)', borderColor: 'var(--border-accent)', color: 'var(--accent)' }}
-                >
-                  ⚡ Tanya
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Finance & AI Intel Feed */}
-      <div className="themed-card p-2.5 space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-mono-num font-bold" style={{ color: 'var(--text-secondary)' }}>
-            📰 INTEL FEED // FINANCE, FOREX & AI
-          </span>
-          <button
-            onClick={() => void onRefreshMarket()}
-            className="text-xs font-mono-num px-2 py-0.5 rounded border cursor-pointer"
-            style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)', color: 'var(--accent-2)' }}
-          >
-            ↻ Refresh RSS / Finnhub
-          </button>
-        </div>
-
-        <div className="space-y-1.5">
-          {news.slice(0, 4).map((n) => (
-            <div key={n.id} className="flex items-center justify-between gap-2 bg-black/25 px-2.5 py-1.5 rounded text-xs">
-              <div className="min-w-0">
-                <span className="font-mono-num mr-1.5" style={{ color: 'var(--accent-2)' }}>
-                  [{n.category.toUpperCase()}]
-                </span>
-                <a href={n.url} target="_blank" rel="noreferrer" className="hover:underline">
-                  {n.title}
-                </a>
-              </div>
-              <button
-                onClick={() =>
-                  onAskLlamreiWithContext(`Ringkas & terjemahkan berita ini ke poin penting untuk trader: ${n.title}`, n as unknown as Record<string, unknown>)
-                }
-                className="shrink-0 px-2 py-0.5 rounded text-xs font-mono-num border cursor-pointer"
-                style={{ background: 'var(--accent-soft)', borderColor: 'var(--border-accent)', color: 'var(--accent)' }}
-              >
-                ⚡ Ringkas AI
-              </button>
-            </div>
-          ))}
-        </div>
+              <RefreshCw size={15} aria-hidden /> {marketStatus === 'refreshing' ? 'Memuat…' : 'Perbarui'}
+            </button>
+          </header>
+          {marketStatus === 'error' && <p role="alert" className={supportingText}>Berita gagal diperbarui. Coba lagi.</p>}
+          {news.length > 0 ? (
+            <ul>
+              {news.slice(0, 4).map((article) => (
+                <li key={article.id} className={`${rowBorder} flex items-start justify-between gap-2 py-2.5`}>
+                  <div className="min-w-0">
+                    <a href={article.url} target="_blank" rel="noreferrer" className="block break-words rounded text-sm leading-snug font-medium hover:underline">
+                      {article.title}
+                    </a>
+                    <p className="mt-1 break-words text-xs text-[var(--text-secondary)]">
+                      {article.url.startsWith('https://example.local/') ? 'Contoh artikel' : article.source_name} · {dateLabel(article.published_at)}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onAskLlamreiWithContext(
+                      `Ringkas & terjemahkan berita ini ke poin penting untuk trader: ${article.title}`,
+                      article as unknown as Record<string, unknown>,
+                    )}
+                    aria-label={`Ringkas berita dengan Llamrei, ${article.title}`}
+                    className={sectionAction}
+                  >
+                    <Sparkles size={15} aria-hidden /> Ringkas
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className={supportingText}>Belum ada berita tersedia.</p>}
+        </section>
       </div>
     </div>
   );

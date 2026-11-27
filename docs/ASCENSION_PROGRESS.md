@@ -5,7 +5,7 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [x] Phase 00 baseline audit and build/test evidence.
 - [ ] Phase 01 centralized authority, privacy and execution reliability.
 - [ ] Phase 02 design tokens and accessible UI primitives.
-- [ ] Phase 03 workspace redesign.
+- [x] Phase 03 workspace redesign and local acceptance checks.
 - [ ] Phases 04–11 per master plan.
 
 ## Phase 00
@@ -36,4 +36,32 @@ Verification for the combined Phase 01 tree: frozen installation of 190 packages
 
 ### Phase 01 gate remains open
 
-The live OpenCode and OpenRouter pricing catalogs returned HTTP 403 in this cloud. Cloud pricing validation used fixtures. Paid execution remains gated until verified pricing and pre-dispatch reservation can be validated. Composio, Tailscale and NectarLink integration tests used fixtures. Live accounts, actual delivery, and hardware acknowledgement are outstanding. Review remaining identity defaults in legacy demo seeds, WhatsApp alias defaults, and repository history separately. Phase 02 and Phase 03 remain pending behind the Phase 01 gate.
+The live OpenCode and OpenRouter pricing catalogs returned HTTP 403 in this cloud. Cloud pricing validation used fixtures. Paid execution remains gated until verified pricing and pre-dispatch reservation can be validated. Composio, Tailscale and NectarLink integration tests used fixtures. Live accounts, actual delivery, and hardware acknowledgement are outstanding. Review remaining identity defaults in legacy demo seeds, WhatsApp alias defaults, and repository history separately.
+
+## Phase 02 — Obsidian foundation and responsive workspace
+
+The commit titled `feat(ui): ship the Obsidian workspace foundation` adds semantic dark and light themes, focus and motion tokens, reusable controls and modal panels, a collapsible desktop sidebar, compact navigation, and a full-screen JARVIS panel. Previously saved themes remain selectable. The command palette supports grouped results, keyboard selection, Escape and focus restoration. The overview prioritizes task and agenda data and shows an unavailable state for a missing TradingView chart. Task views retain the list, Kanban, calendar and timeline, surface custom statuses, keep titles readable at mobile widths, and expose keyboard view and status controls. These UI changes build on the Phase 01 feature branch while its live integration checks remain open.
+
+Node 24 completed a fresh lockfile installation (191 packages), typecheck, a production build and 38 tests with no failures or skips. The production dependency audit reported zero vulnerabilities. Lucide React 0.577.0 is ISC-licensed and declares React 19 support. The full UI JavaScript build measured 128.07 kB gzipped, up from 120.64 kB for Phase 01.
+
+Chromium exercised anonymous fixtures at 360, 768 and 1440 px. Verified navigation and collapse, 44 px primary navigation targets, keyboard palette selection into task detail, Escape and focus restoration, JARVIS shortcut, task title filtering and keyboard tabs, and reload from a simulated bootstrap failure. The title area at 360 px measured 302 px. The screenshots showed no horizontal document overflow. Scoped axe checks returned zero automated violations for the palette and inspected desktop screens. The tested text token pairs measured 6.51:1 or higher in both themes. Full manual contrast review, migration of legacy UI primitives, and performance checks on target hardware are outstanding.
+
+The Phase 03 batches below record the wider redesign and functional acceptance on disposable local data. Live Phase 01 delivery, device acknowledgement and paid AI reservations remain open.
+
+## Phase 03 batch 1 — schedule and alarm integrity
+
+Commit `6831243` (`fix(calendar): preserve durations and linked alarm state`) keeps durations during a calendar move, updates linked alarms and task projections together, and preserves a task deadline when moving its independent focus block. Metadata edits preserve snoozed or dismissed alarms. Due alarms compare instants across timezone offsets and are claimed before delivery work. Schedule previews account for events crossing midnight in WIB. Interactive schedule application can reject a preview that changed before confirmation. Unscheduled tasks stay outside the timeline.
+
+The full server suite passed 43 tests, including five calendar regression cases on disposable SQLite. No schema migration was needed. Browser acceptance for the redesigned screens is tracked in the next batch.
+
+## Phase 03 batch 2 — Obsidian workspace workflows
+
+The commit titled `feat(workspace): deliver Phase 03 Obsidian workflows` links the overview to actual tasks, upcoming agendas, alarms and approval states. The task workspace shares status and priority filters across list, Kanban, calendar and timeline, and saves view and density preferences locally. Task details use explicit saves for content and dates and report failures without clearing the form. Calendar day, week, month and agenda modes use WIB, show source and conflicts, and preview moves before writing. The alarm center supports browser ringing, one-shot tone samples, snooze, dismissal and explicit phone participation. Search opens exact workspace results. Copilot contextual actions open a draft for explicit submission, and settings group model, budget, cloud consent and connection options.
+
+Node 24.22.3 completed `npm ci` from the lockfile, `npm run typecheck`, `npm run build` and `LLAMREI_DB_PATH=:memory: npm test` with 43 passed and zero failures or skips. The production build measured 134.37 kB gzipped JavaScript. This phase adds no dependencies or schema migrations.
+
+Chromium with a loopback API and synthetic in-memory SQLite verified task, subtask and document CRUD, failed-create retry, saved filters, keyboard status change, Kanban drag/drop, timer, Markdown import and CSV export. It verified agenda creation, calendar drag/drop preview, conflicts, duration and linked alarm preservation, all four calendar modes, alarm creation and browser ringing, snooze, dismissal and toggle. Auto-schedule returned HTTP 409 for a stale preview without writing blocks, then applied the refreshed times. Settings theme persistence, keyboard focus and Copilot draft, failed-send retry, local approval and Undo also passed. The fixture blocked outbound requests.
+
+Screenshots were captured in Obsidian at 360, 768 and 1440 px and in the light theme at 1440 px. The inspected layouts had no horizontal document overflow or browser errors. Scoped axe checks found zero automated violations in the calendar and command palette. Calendar contrast follow-up remains for nodes axe flagged for manual review. On this cloud host using Vite and synthetic data, cold overview loads took 423–597 ms, opening and filling the palette took 57–70 ms, and calendar navigation took 81–84 ms on desktop and 173–174 ms through the compact drawer. Performance on target hardware remains unverified.
+
+The Phase 03 local acceptance gate passes. Real Android exact alarms, NectarLink delivery, live Notion sync and real cloud account execution remain unverified. Phase 04 covers provider routing, streaming, cost and context validation before live opt-in smoke checks.

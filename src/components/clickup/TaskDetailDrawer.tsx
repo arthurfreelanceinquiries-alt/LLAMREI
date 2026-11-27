@@ -1,523 +1,374 @@
-import { useState } from 'react';
-import type { ActiveTimer, MacroGoal, ScheduledMessageItem, TaskItem, WorkspaceDocItem } from '../../types/llamrei';
+import { ArrowLeft, Camera, FileText, Play, Plus, Sparkles, Square, Trash2, X } from 'lucide-react';
+import { useState, type FormEvent } from 'react';
+import { formatWibStamp, wibDateTimeInput, wibDateTimeToIso } from '../../lib/calendar-time';
+import { listTaskStatuses } from '../../lib/task-status';
+import { usePendingAction } from '../../lib/use-pending-action';
+import type { ActiveTimer, ListItem, MacroGoal, ScheduledMessageItem, TaskItem, WorkspaceDocItem } from '../../types/llamrei';
+import { Control } from '../ui/Control';
+import { DialogPanel } from '../ui/DialogPanel';
 
-interface TypedCustomField {
+interface CustomField {
   type: 'text' | 'number' | 'date' | 'select' | 'url';
   value: string;
 }
 
 interface Props {
   task: TaskItem | null;
+  list?: ListItem;
   subtasks: TaskItem[];
   goals: MacroGoal[];
   linkedChats: ScheduledMessageItem[];
   linkedDocs: WorkspaceDocItem[];
   activeTimer: ActiveTimer | null;
   onClose: () => void;
+  onOpenRelatedTask: (id: string) => void;
   onUpdateTask: (taskId: string, patch: Record<string, unknown>) => Promise<void>;
   onUpdateTaskMeta: (taskId: string, meta: { recurrenceRule?: string; customFields?: Record<string, unknown> }) => Promise<void>;
-  onCreateDoc: (input: { linkedTaskId: string; title: string; contentMd: string }) => Promise<void>;
+  onSaveDoc: (input: { id?: string; linkedTaskId: string; title: string; contentMd: string }) => Promise<void>;
   onDeleteDoc: (docId: string) => Promise<void>;
-  onCreateSubtask: (parentTask: TaskItem, title: string) => Promise<void>;
+  onCreateSubtask: (parent: TaskItem, title: string) => Promise<void>;
   onDeleteTask: (taskId: string) => Promise<void>;
   onStartTimer: (taskId: string) => Promise<void>;
   onStopTimer: (taskId: string) => Promise<void>;
-  onScanAttachmentFromPhone: (taskId: string) => Promise<void>;
+  onScanAttachmentFromPhone: (taskId: string) => Promise<string>;
   onAskLlamrei: (prompt: string, context: Record<string, unknown>) => void;
 }
 
-function safeParseJson<T>(raw: string | undefined, fallback: T): T {
-  if (!raw) return fallback;
+function arrayOrEmpty<T>(raw: string | undefined): T[] {
   try {
-    return JSON.parse(raw) as T;
+    const value: unknown = JSON.parse(raw ?? '[]');
+    return Array.isArray(value) ? value : [];
   } catch {
-    return fallback;
+    return [];
   }
 }
 
-function formatIsoToWibDatetimeLocal(iso: string | null): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Jakarta',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(d);
-  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-  const hh = map.hour === '24' ? '00' : map.hour;
-  return `${map.year}-${map.month}-${map.day}T${hh}:${map.minute}`;
+function taskCustomFields(raw: string | undefined): Record<string, CustomField> {
+  try {
+    const value: unknown = JSON.parse(raw ?? '{}');
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).map(([key, field]) => [
+      key,
+      field && typeof field === 'object' && 'type' in field && 'value' in field
+        ? { type: field.type, value: String(field.value ?? '') }
+        : { type: 'text', value: String(field ?? '') },
+    ]));
+  } catch {
+    return {};
+  }
 }
 
-export function TaskDetailDrawer({
-  task,
-  subtasks,
-  goals,
-  linkedChats,
-  linkedDocs,
-  activeTimer,
-  onClose,
-  onUpdateTask,
-  onUpdateTaskMeta,
-  onCreateDoc,
-  onDeleteDoc,
-  onCreateSubtask,
-  onDeleteTask,
-  onStartTimer,
-  onStopTimer,
-  onScanAttachmentFromPhone,
-  onAskLlamrei,
-}: Props) {
-  const [newSub, setNewSub] = useState('');
+const recurrence = {
+  none: 'Tidak berulang',
+  daily: 'Harian',
+  weekdays: 'Hari kerja',
+  weekly: 'Mingguan',
+  monthly: 'Bulanan',
+};
+
+type Detail = NonNullable<Props['task']>;
+function timeFields(task: Detail) {
+  return {
+    start: task.start_at ? wibDateTimeInput(task.start_at) : '',
+    due: task.due_at ? wibDateTimeInput(task.due_at) : '',
+  };
+}
+
+export function TaskDetailDrawer({ task, ...props }: Props) {
+  return task ? <TaskDetail key={task.id} task={task} {...props} /> : null;
+}
+
+function TaskDetail({
+  task, list, subtasks, goals, linkedChats, linkedDocs, activeTimer, onClose, onOpenRelatedTask,
+  onUpdateTask, onUpdateTaskMeta, onSaveDoc, onDeleteDoc, onCreateSubtask, onDeleteTask, onStartTimer, onStopTimer,
+  onScanAttachmentFromPhone, onAskLlamrei,
+}: Omit<Props, 'task'> & { task: Detail }) {
+  const [title, setTitle] = useState(task.title);
+  const [description, setDescription] = useState(task.description_md);
+  const [schedule, setSchedule] = useState(() => timeFields(task));
+  const [newSubtask, setNewSubtask] = useState('');
   const [newCheck, setNewCheck] = useState('');
-  const [cfKey, setCfKey] = useState('');
-  const [cfType, setCfType] = useState<TypedCustomField['type']>('text');
-  const [cfVal, setCfVal] = useState('');
-  const [docTitle, setDocTitle] = useState('');
-  const [docBody, setDocBody] = useState('');
+  const [field, setField] = useState<{ name: string } & CustomField>({ name: '', type: 'text', value: '' });
+  const [doc, setDoc] = useState<{ id?: string; title: string; body: string }>({ title: '', body: '' });
+  const [confirmRemoval, setConfirmRemoval] = useState<{ kind: 'task' | 'document'; id: string; title: string }>();
+  const [notice, setNotice] = useState('');
+  const action = usePendingAction();
+  const checklist = arrayOrEmpty<{ id: string; text: string; done: boolean }>(task.checklist_json);
+  const attachments = arrayOrEmpty<{ id: string; name: string; source: string }>(task.attachments_json);
+  const fields = taskCustomFields(task.custom_fields_json);
+  const timerRunning = activeTimer?.task_id === task.id;
+  const currentSchedule = timeFields(task);
+  const start = schedule.start ? wibDateTimeToIso(schedule.start) : null;
+  const due = schedule.due ? wibDateTimeToIso(schedule.due) : null;
+  const invalidRange = !!(start && due && Date.parse(start) > Date.parse(due));
+  const scheduleChanged = schedule.start !== currentSchedule.start || schedule.due !== currentSchedule.due;
+  const hasSchedule = !!(task.start_at || task.due_at || task.auto_scheduled_block_start);
 
-  if (!task) return null;
+  function run(key: string, operation: () => Promise<void>, failure = 'Perubahan belum dapat disimpan. Periksa koneksi dan coba lagi.') {
+    setNotice('');
+    return action.run(key, operation, failure);
+  }
 
-  const checklist = safeParseJson<Array<{ id: string; text: string; done: boolean }>>(task.checklist_json, []);
-  const attachments = safeParseJson<Array<{ id: string; name: string; source: string }>>(task.attachments_json, []);
-  const rawCustomFields = safeParseJson<Record<string, unknown>>(task.custom_fields_json, {});
-  const customFields: Record<string, TypedCustomField> = {};
-  for (const [k, v] of Object.entries(rawCustomFields)) {
-    if (v && typeof v === 'object' && 'type' in v && 'value' in v) {
-      customFields[k] = v as TypedCustomField;
-    } else {
-      customFields[k] = { type: 'text', value: String(v ?? '') };
+  function saveTask(patch: Record<string, unknown>) {
+    return run('task', () => onUpdateTask(task.id, patch));
+  }
+
+  async function saveText(event: FormEvent) {
+    event.preventDefault();
+    if (!title.trim()) return;
+    if (await saveTask({ title: title.trim(), descriptionMd: description })) setNotice('Detail tugas tersimpan.');
+  }
+
+  async function addSubtask(event: FormEvent) {
+    event.preventDefault();
+    if (!newSubtask.trim()) return;
+    if (await run('subtask', () => onCreateSubtask(task, newSubtask.trim()))) setNewSubtask('');
+  }
+
+  async function addChecklistItem(event: FormEvent) {
+    event.preventDefault();
+    if (!newCheck.trim()) return;
+    const next = [...checklist, { id: `chk_${crypto.randomUUID()}`, text: newCheck.trim(), done: false }];
+    if (await saveTask({ checklist: next })) setNewCheck('');
+  }
+
+  async function saveField(event: FormEvent) {
+    event.preventDefault();
+    const key = field.name.trim();
+    if (!key || !field.value.trim() || ['__proto__', 'constructor', 'prototype'].includes(key)) return;
+    const customFields = { ...fields, [key]: { type: field.type, value: field.value.trim() } };
+    if (await run('field', () => onUpdateTaskMeta(task.id, { customFields }))) setField({ name: '', type: 'text', value: '' });
+  }
+
+  async function saveDoc(event: FormEvent) {
+    event.preventDefault();
+    if (!doc.title.trim()) return;
+    if (await run('document', () => onSaveDoc({ id: doc.id, linkedTaskId: task.id, title: doc.title.trim(), contentMd: doc.body }))) {
+      setDoc({ title: '', body: '' });
     }
   }
 
-  const isTimerRunning = activeTimer?.task_id === task.id;
-  const dueLocalValue = formatIsoToWibDatetimeLocal(task.due_at ?? task.start_at);
-
-  const saveCustomFieldsMap = async (nextMap: Record<string, TypedCustomField>) => {
-    await onUpdateTaskMeta(task.id, { customFields: nextMap });
-  };
+  async function remove() {
+    if (!confirmRemoval) return;
+    const { kind, id } = confirmRemoval;
+    if (await run('delete', () => kind === 'document' ? onDeleteDoc(id) : onDeleteTask(id), 'Penghapusan belum terkonfirmasi.')) {
+      setConfirmRemoval(undefined);
+      if (kind === 'task') onClose();
+      if (doc.id === id) setDoc({ title: '', body: '' });
+    }
+  }
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-xs flex justify-end" onClick={onClose}>
-      <div
-        className="w-full max-w-lg h-full border-l p-4 overflow-y-auto themed-scroll space-y-4 shadow-2xl"
-        style={{ background: 'var(--bg-panel)', borderColor: 'var(--border-subtle)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-start justify-between gap-2 border-b pb-3" style={{ borderColor: 'var(--border-subtle)' }}>
-          <div className="space-y-1 flex-1">
-            <div className="text-xs font-mono-num" style={{ color: 'var(--accent)' }}>
-              TASK DETAIL // CLICKUP + ALARM + CALENDAR (WIB)
-            </div>
-            <input
-              defaultValue={task.title}
-              onBlur={(e) => {
-                if (e.target.value.trim() && e.target.value !== task.title) {
-                  void onUpdateTask(task.id, { title: e.target.value.trim() });
-                }
-              }}
-              className="w-full text-base font-bold bg-transparent outline-none border-b border-transparent focus:border-white/20"
-            />
+    <DialogPanel label="Detail tugas" className="workspace-task-dialog themed-scroll" onClose={() => { if (!action.pending) onClose(); }}>
+      <header className="sticky top-0 z-10 border-b border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-2 sm:px-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="font-semibold">{task.parent_task_id ? 'Detail subtugas' : 'Detail tugas'}</h2>
+            <p className="text-xs text-[var(--text-secondary)] [overflow-wrap:anywhere]">{list?.name ?? task.status}</p>
           </div>
-          <button onClick={onClose} className="px-2 py-1 rounded text-xs bg-white/5 cursor-pointer">
-            ✕
-          </button>
+          <Control onClick={onClose} disabled={!!action.pending} aria-label="Tutup detail tugas"><X aria-hidden="true" /></Control>
         </div>
+        {action.error && <p className="ds-note" role="alert">{action.error}</p>}
+        {notice && <p className="ds-note" role="status">{notice}</p>}
+        {action.pending && <p className="text-xs text-[var(--text-secondary)]" role="status">Memproses perubahan…</p>}
+      </header>
 
-        {/* Quick Actions */}
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => void (isTimerRunning ? onStopTimer(task.id) : onStartTimer(task.id))}
-            className="px-2.5 py-1.5 rounded text-xs font-mono-num font-bold cursor-pointer"
-            style={{
-              background: isTimerRunning ? '#ef4444' : 'var(--accent)',
-              color: isTimerRunning ? '#ffffff' : 'var(--accent-fg)',
-            }}
-          >
-            {isTimerRunning ? '⏹ Stop Timer & Matikan DND' : '▶ Mulai Timer (+ Auto-DND HP)'}
-          </button>
-
-          <button
-            onClick={() => void onScanAttachmentFromPhone(task.id)}
-            className="px-2.5 py-1.5 rounded text-xs font-mono-num border cursor-pointer"
-            style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--accent-2)' }}
-          >
-            📷 Scan dari HP (NectarLink)
-          </button>
-
-          <button
-            onClick={() => {
-              onAskLlamrei(`Pecah tugas "${task.title}" jadi subtugas atau jadwalkan waktunya`, task as unknown as Record<string, unknown>);
+      <fieldset disabled={!!action.pending} className="min-w-0 space-y-4 p-3 sm:p-4">
+        {task.parent_task_id && <Control className="ds-control--outline" onClick={() => onOpenRelatedTask(task.parent_task_id!)}><ArrowLeft aria-hidden="true" /> Tugas induk</Control>}
+        <section className="themed-card space-y-3 p-3">
+          <form className="space-y-3" onSubmit={(event) => void saveText(event)}>
+            <label className="ds-label">Judul tugas<input required className="ds-field font-semibold" value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+            <label className="ds-label">Deskripsi<textarea className="ds-field" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+            <Control type="submit" className="ds-control--primary" disabled={!title.trim() || (title === task.title && description === task.description_md)}>Simpan detail</Control>
+          </form>
+          <div className="flex flex-wrap gap-1 border-t border-[var(--border-subtle)] pt-2">
+            <Control className="ds-control--outline" onClick={() => void run('timer', () => timerRunning ? onStopTimer(task.id) : onStartTimer(task.id), 'Timer belum dapat diperbarui.')}>
+              {timerRunning ? <Square aria-hidden="true" /> : <Play aria-hidden="true" />} {timerRunning ? 'Hentikan timer' : 'Mulai timer'}
+            </Control>
+            <Control className="ds-control--outline" onClick={() => void run('scan', async () => {
+              setNotice(await onScanAttachmentFromPhone(task.id));
+            }, 'Status pemindaian belum diterima.')}>
+              <Camera aria-hidden="true" /> Pindai lewat ponsel
+            </Control>
+            <Control className="ds-control--outline" onClick={() => {
+              onAskLlamrei(`Bantu saya merinci subtugas atau jadwal untuk "${task.title}".`, task as unknown as Record<string, unknown>);
               onClose();
-            }}
-            className="px-2.5 py-1.5 rounded text-xs font-mono-num border cursor-pointer"
-            style={{ background: 'var(--accent-soft)', borderColor: 'var(--border-accent)', color: 'var(--accent)' }}
-          >
-            ⚡ Suruh Llamrei
-          </button>
-        </div>
+            }}><Sparkles aria-hidden="true" /> Tanya Llamrei</Control>
+          </div>
+        </section>
 
-        {/* Status, Priority, Goal, Due Date (WIB), Hard Alarm, Recurrence */}
-        <div className="themed-card p-3 grid grid-cols-2 gap-3 text-xs">
-          <label className="space-y-1">
-            <span style={{ color: 'var(--text-muted)' }}>Status</span>
-            <select
-              value={task.status}
-              onChange={(e) => void onUpdateTask(task.id, { status: e.target.value })}
-              className="w-full px-2 py-1.5 rounded border"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            >
-              <option value="To Do">To Do</option>
-              <option value="In Progress">In Progress</option>
-              <option value="Review">Review</option>
-              <option value="Done">Done</option>
-            </select>
-          </label>
-
-          <label className="space-y-1">
-            <span style={{ color: 'var(--text-muted)' }}>Prioritas</span>
-            <select
-              value={task.priority}
-              onChange={(e) => void onUpdateTask(task.id, { priority: e.target.value })}
-              className="w-full px-2 py-1.5 rounded border"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            >
-              <option value="urgent">Urgent</option>
-              <option value="high">High</option>
-              <option value="normal">Normal</option>
-              <option value="low">Low</option>
-            </select>
-          </label>
-
-          <label className="space-y-1 col-span-2">
-            <span style={{ color: 'var(--text-muted)' }}>Jam & Tenggat WIB (Auto Soft Reminder H-15m)</span>
-            <input
-              type="datetime-local"
-              defaultValue={dueLocalValue}
-              onChange={(e) => {
-                if (!e.target.value) return;
-                const wibIso = new Date(`${e.target.value}:00+07:00`).toISOString();
-                void onUpdateTask(task.id, { startAt: wibIso, dueAt: wibIso });
-              }}
-              className="w-full px-2 py-1.5 rounded border font-mono-num"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-          </label>
-
-          <label className="space-y-1 col-span-2">
-            <span style={{ color: 'var(--text-muted)' }}>Kaitkan ke Macro Goal (FR-50)</span>
-            <select
-              value={task.goal_id ?? ''}
-              onChange={(e) => void onUpdateTask(task.id, { goalId: e.target.value || null })}
-              className="w-full px-2 py-1.5 rounded border"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            >
-              <option value="">— Tanpa Macro Goal —</option>
-              {goals.map((g) => (
-                <option key={g.id} value={g.id}>
-                  🎯 {g.title} ({g.progress_percent}%)
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <div className="col-span-2 flex items-center justify-between pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+        <section className="themed-card space-y-3 p-3">
+          <h3 className="text-sm font-semibold">Properti & jadwal</h3>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="ds-label">Status
+              <select className="ds-field" value={task.status} onChange={(event) => void saveTask({ status: event.target.value })}>
+                {listTaskStatuses(list, task.status).map((status) => <option key={status}>{status}</option>)}
+              </select>
+            </label>
+            <label className="ds-label">Prioritas
+              <select className="ds-field" value={task.priority} onChange={(event) => void saveTask({ priority: event.target.value })}>
+                <option value="urgent">Mendesak</option><option value="high">Tinggi</option>
+                <option value="normal">Normal</option><option value="low">Rendah</option>
+              </select>
+            </label>
+            <label className="ds-label">Target
+              <select className="ds-field" value={task.goal_id ?? ''} onChange={(event) => void saveTask({ goalId: event.target.value || null })}>
+                <option value="">Tanpa target</option>
+                {goals.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
+              </select>
+            </label>
+            <label className="ds-label">Pengulangan
+              <select className="ds-field" value={task.recurrence_rule ?? 'none'} onChange={(event) => {
+                const recurrenceRule = event.target.value;
+                void run('recurrence', () => onUpdateTaskMeta(task.id, { recurrenceRule }));
+              }}>
+                {Object.entries(recurrence).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+              </select>
+            </label>
+          </div>
+          <form className="space-y-2" onSubmit={(event) => {
+            event.preventDefault();
+            if (!invalidRange && scheduleChanged) void saveTask({
+              ...(schedule.start !== currentSchedule.start ? { startAt: start } : {}),
+              ...(schedule.due !== currentSchedule.due ? { dueAt: due } : {}),
+            });
+          }}>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="ds-label">Mulai tugas (WIB)<input className="ds-field" type="datetime-local" value={schedule.start} onChange={(event) => setSchedule({ ...schedule, start: event.target.value })} /></label>
+              <label className="ds-label">Tenggat tugas (WIB)<input className="ds-field" type="datetime-local" value={schedule.due} onChange={(event) => setSchedule({ ...schedule, due: event.target.value })} /></label>
+            </div>
+            {invalidRange && <p className="ds-note" role="alert">Tenggat harus sama dengan atau setelah waktu mulai.</p>}
+            <Control type="submit" className="ds-control--outline" disabled={!scheduleChanged || invalidRange}>Simpan jadwal tugas</Control>
+          </form>
+          {task.auto_scheduled_block_start && <p className="text-xs text-[var(--text-secondary)]">Blok fokus: {formatWibStamp(task.auto_scheduled_block_start)}</p>}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-2">
             <div>
-              <div className="font-semibold text-amber-300">⏰ Sakelar Hard Alarm (Web + Dering HP)</div>
-              <div style={{ color: 'var(--text-muted)' }}>Berbunyi terus sampai Anda klik Dismiss / Snooze</div>
+              <p className="text-sm font-semibold">Hard alarm</p>
+              <p className="text-xs text-[var(--text-secondary)]">{hasSchedule ? 'Atur bunyi dan ponsel di layar Alarm.' : 'Simpan jadwal tugas untuk memasang alarm.'}</p>
             </div>
-            <button
-              onClick={() =>
-                void onUpdateTask(task.id, {
-                  hardAlarmEnabled: task.hard_alarm_enabled !== 1,
-                  hardAlarmAt: task.hard_alarm_at ?? task.start_at ?? task.due_at ?? new Date(Date.now() + 3_600_000).toISOString(),
-                })
-              }
-              className="px-3 py-1 rounded font-mono-num font-bold cursor-pointer"
-              style={
-                task.hard_alarm_enabled === 1
-                  ? { background: '#f59e0b', color: '#050507' }
-                  : { background: 'var(--bg-void)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }
-              }
-            >
-              {task.hard_alarm_enabled === 1 ? 'ON' : 'OFF'}
-            </button>
+            <Control
+              className="ds-control--outline"
+              aria-pressed={task.hard_alarm_enabled === 1}
+              aria-label="Hard alarm tugas"
+              disabled={!hasSchedule && task.hard_alarm_enabled !== 1}
+              onClick={() => void saveTask({ hardAlarmEnabled: task.hard_alarm_enabled !== 1 })}
+            >{task.hard_alarm_enabled === 1 ? 'Terpasang' : 'Nonaktif'}</Control>
           </div>
+        </section>
 
-          <label className="space-y-1 col-span-2 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
-            <span style={{ color: 'var(--text-muted)' }}>🔁 Tugas Berulang (Auto-Spawn Saat Done)</span>
-            <select
-              value={task.recurrence_rule ?? 'none'}
-              onChange={(e) => void onUpdateTaskMeta(task.id, { recurrenceRule: e.target.value })}
-              className="w-full px-2 py-1.5 rounded border"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            >
-              <option value="none">Tidak Berulang</option>
-              <option value="daily">Harian (Daily)</option>
-              <option value="weekdays">Hari Kerja WIB (Senin–Jumat)</option>
-              <option value="weekly">Mingguan (Weekly)</option>
-              <option value="monthly">Bulanan (Monthly)</option>
-            </select>
-          </label>
-        </div>
-
-        {/* Typed Custom Fields (FR-16: angka, tanggal, pilihan, tautan) */}
-        <div className="themed-card p-3 space-y-2 text-xs">
-          <div className="font-semibold">🧩 Custom Fields ({Object.keys(customFields).length})</div>
-          {Object.entries(customFields).map(([k, f]) => (
-            <div key={k} className="flex items-center justify-between gap-2 bg-black/25 px-2 py-1 rounded">
-              <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-                {k} <span className="opacity-60">({f.type})</span>
-              </span>
-              <div className="flex items-center gap-2 min-w-0">
-                {f.type === 'url' && /^https?:\/\//i.test(f.value) ? (
-                  <a href={f.value} target="_blank" rel="noreferrer" className="font-mono-num underline truncate" style={{ color: 'var(--accent-2)' }}>
-                    {f.value} ↗
-                  </a>
-                ) : (
-                  <span className="font-mono-num font-semibold truncate">{f.value}</span>
-                )}
-                <button
-                  onClick={() => {
-                    const next = { ...customFields };
-                    delete next[k];
-                    void saveCustomFieldsMap(next);
-                  }}
-                  className="text-rose-400 cursor-pointer"
-                  title="Hapus field"
-                >
-                  ✕
+        <section className="themed-card space-y-2 p-3">
+          <h3 className="font-semibold">Subtugas</h3>
+          {subtasks.length === 0 && <p className="text-sm text-[var(--text-secondary)]">Belum ada subtugas.</p>}
+          <ul className="divide-y divide-[var(--border-subtle)]">
+            {subtasks.map((subtask) => (
+              <li key={subtask.id} className="flex min-h-11 items-center gap-2">
+                <input type="checkbox" aria-label={`Tandai selesai ${subtask.title}`} checked={subtask.status === 'Done'} onChange={(event) => {
+                  const status = event.target.checked ? 'Done' : 'To Do';
+                  void run('subtask-status', () => onUpdateTask(subtask.id, { status }));
+                }} />
+                <button type="button" className="min-h-11 text-left text-sm hover:underline [overflow-wrap:anywhere]" onClick={() => onOpenRelatedTask(subtask.id)}>
+                  {subtask.title}
                 </button>
-              </div>
-            </div>
-          ))}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const cleanKey = cfKey.trim();
-              if (!cleanKey || !cfVal.trim() || cleanKey === '__proto__' || cleanKey === 'constructor') return;
-              void saveCustomFieldsMap({ ...customFields, [cleanKey]: { type: cfType, value: cfVal.trim() } });
-              setCfKey('');
-              setCfVal('');
-            }}
-            className="grid grid-cols-12 gap-1.5"
-          >
-            <input
-              value={cfKey}
-              onChange={(e) => setCfKey(e.target.value)}
-              placeholder="Nama field"
-              className="col-span-4 px-2 py-1 rounded border text-xs outline-none"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-            <select
-              value={cfType}
-              onChange={(e) => setCfType(e.target.value as TypedCustomField['type'])}
-              className="col-span-3 px-1.5 py-1 rounded border text-xs"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            >
-              <option value="text">Teks</option>
-              <option value="number">Angka</option>
-              <option value="date">Tanggal</option>
-              <option value="select">Pilihan</option>
-              <option value="url">Tautan</option>
-            </select>
-            <input
-              type={cfType === 'number' ? 'number' : cfType === 'date' ? 'date' : cfType === 'url' ? 'url' : 'text'}
-              value={cfVal}
-              onChange={(e) => setCfVal(e.target.value)}
-              placeholder="Nilai..."
-              className="col-span-4 px-2 py-1 rounded border text-xs outline-none"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-            <button type="submit" className="col-span-1 px-1 py-1 rounded border cursor-pointer" style={{ borderColor: 'var(--border-subtle)' }}>
-              +
-            </button>
+              </li>
+            ))}
+          </ul>
+          <form className="flex gap-2" onSubmit={(event) => void addSubtask(event)}>
+            <input className="ds-field" aria-label="Nama subtugas baru" placeholder="Nama subtugas" value={newSubtask} onChange={(event) => setNewSubtask(event.target.value)} />
+            <Control type="submit" className="ds-control--outline" aria-label="Tambah subtugas" disabled={!newSubtask.trim()}><Plus aria-hidden="true" /></Control>
           </form>
-        </div>
+        </section>
 
-        {/* Description */}
-        <div className="space-y-1 text-xs">
-          <div className="font-semibold" style={{ color: 'var(--text-muted)' }}>
-            Deskripsi / Catatan
-          </div>
-          <textarea
-            rows={3}
-            defaultValue={task.description_md}
-            onBlur={(e) => void onUpdateTask(task.id, { descriptionMd: e.target.value })}
-            placeholder="Tambahkan detail tugas..."
-            className="w-full p-2.5 rounded border text-xs outline-none"
-            style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-          />
-        </div>
-
-        {/* Subtasks */}
-        <div className="themed-card p-3 space-y-2 text-xs">
-          <div className="font-semibold">Subtasks ({subtasks.length})</div>
-          {subtasks.map((sub) => (
-            <div key={sub.id} className="flex items-center justify-between bg-black/25 px-2 py-1.5 rounded">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={sub.status === 'Done'}
-                  onChange={(e) => void onUpdateTask(sub.id, { status: e.target.checked ? 'Done' : 'To Do' })}
-                />
-                <span className={sub.status === 'Done' ? 'line-through opacity-60' : ''}>{sub.title}</span>
-              </label>
-            </div>
-          ))}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!newSub.trim()) return;
-              void onCreateSubtask(task, newSub.trim());
-              setNewSub('');
-            }}
-            className="flex gap-1.5"
-          >
-            <input
-              value={newSub}
-              onChange={(e) => setNewSub(e.target.value)}
-              placeholder="+ Tambah subtugas..."
-              className="flex-1 px-2 py-1 rounded border text-xs outline-none"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-            <button type="submit" className="px-2.5 py-1 rounded font-bold cursor-pointer" style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}>
-              +
-            </button>
-          </form>
-        </div>
-
-        {/* Action Checklist */}
-        <div className="themed-card p-3 space-y-2 text-xs">
-          <div className="font-semibold">Action Checklist ({checklist.length})</div>
+        <section className="themed-card space-y-2 p-3">
+          <h3 className="font-semibold">Checklist</h3>
           {checklist.map((item) => (
-            <label key={item.id} className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={item.done}
-                onChange={(e) => {
-                  const next = checklist.map((c) => (c.id === item.id ? { ...c, done: e.target.checked } : c));
-                  void onUpdateTask(task.id, { checklist: next });
-                }}
-              />
-              <span className={item.done ? 'line-through opacity-60' : ''}>{item.text}</span>
+            <label key={item.id} className="flex min-h-11 items-center gap-2 text-sm [overflow-wrap:anywhere]">
+              <input type="checkbox" checked={item.done} onChange={(event) => void saveTask({
+                checklist: checklist.map((entry) => entry.id === item.id ? { ...entry, done: event.target.checked } : entry),
+              })} /> {item.text}
             </label>
           ))}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!newCheck.trim()) return;
-              const next = [...checklist, { id: `chk_${Date.now()}`, text: newCheck.trim(), done: false }];
-              void onUpdateTask(task.id, { checklist: next });
-              setNewCheck('');
-            }}
-            className="flex gap-1.5"
-          >
-            <input
-              value={newCheck}
-              onChange={(e) => setNewCheck(e.target.value)}
-              placeholder="+ Item checklist..."
-              className="flex-1 px-2 py-1 rounded border text-xs outline-none"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-            <button type="submit" className="px-2.5 py-1 rounded border cursor-pointer" style={{ borderColor: 'var(--border-subtle)' }}>
-              +
-            </button>
+          <form className="flex gap-2" onSubmit={(event) => void addChecklistItem(event)}>
+            <input className="ds-field" aria-label="Item checklist baru" placeholder="Item checklist" value={newCheck} onChange={(event) => setNewCheck(event.target.value)} />
+            <Control type="submit" className="ds-control--outline" aria-label="Tambah checklist" disabled={!newCheck.trim()}><Plus aria-hidden="true" /></Control>
           </form>
-        </div>
+        </section>
 
-        {/* Linked Workspace Docs (FR-19) */}
-        <div className="themed-card p-3 space-y-2 text-xs">
-          <div className="font-semibold">📄 Dokumen & Catatan Tertaut ({linkedDocs.length})</div>
-          {linkedDocs.map((d) => (
-            <div key={d.id} className="bg-black/25 p-2 rounded space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold">{d.title}</span>
-                <button onClick={() => void onDeleteDoc(d.id)} className="text-rose-400 cursor-pointer">
-                  ✕
-                </button>
+        <section className="themed-card space-y-2 p-3">
+          <h3 className="flex items-center gap-2 font-semibold"><FileText size={16} aria-hidden="true" /> Dokumen tertaut</h3>
+          {linkedDocs.map((item) => (
+            <article key={item.id} className="space-y-1 rounded-lg bg-[var(--bg-elevated)] px-3 py-2 [overflow-wrap:anywhere]">
+              <h4 className="text-sm font-semibold">{item.title}</h4>
+              <p className="whitespace-pre-wrap text-sm text-[var(--text-secondary)]">{item.content_md}</p>
+              <div className="flex gap-1">
+                <Control onClick={() => setDoc({ id: item.id, title: item.title, body: item.content_md })}>Edit dokumen</Control>
+                <Control aria-label={`Hapus dokumen ${item.title}`} onClick={() => setConfirmRemoval({ kind: 'document', id: item.id, title: item.title })}><Trash2 aria-hidden="true" /></Control>
               </div>
-              <div className="whitespace-pre-wrap" style={{ color: 'var(--text-secondary)' }}>
-                {d.content_md}
-              </div>
+            </article>
+          ))}
+          <form className="space-y-2" onSubmit={(event) => void saveDoc(event)}>
+            <label className="ds-label">Judul dokumen<input required className="ds-field" value={doc.title} onChange={(event) => setDoc({ ...doc, title: event.target.value })} /></label>
+            <label className="ds-label">Isi dokumen (Markdown)<textarea className="ds-field" rows={3} value={doc.body} onChange={(event) => setDoc({ ...doc, body: event.target.value })} /></label>
+            <div className="flex flex-wrap gap-1">
+              <Control type="submit" className="ds-control--outline" disabled={!doc.title.trim()}>{doc.id ? 'Simpan dokumen' : 'Tambahkan dokumen'}</Control>
+              {doc.id && <Control onClick={() => setDoc({ title: '', body: '' })}>Batal edit</Control>}
+            </div>
+          </form>
+        </section>
+
+        <section className="themed-card space-y-2 p-3">
+          <h3 className="font-semibold">Kolom kustom</h3>
+          {Object.entries(fields).map(([name, value]) => (
+            <div key={name} className="flex flex-wrap items-center gap-2 border-b border-[var(--border-subtle)] pb-1 text-sm">
+              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><strong>{name}</strong> · {value.type === 'url' && /^https?:\/\//i.test(value.value)
+                ? <a href={value.value} target="_blank" rel="noreferrer" className="text-[var(--accent)] underline">{value.value}</a> : value.value}</span>
+              <Control onClick={() => setField({ name, ...value })}>Edit</Control>
+              <Control aria-label={`Hapus kolom ${name}`} onClick={() => {
+                const next = { ...fields };
+                delete next[name];
+                void run('field', () => onUpdateTaskMeta(task.id, { customFields: next }));
+              }}><Trash2 aria-hidden="true" /></Control>
             </div>
           ))}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!docTitle.trim()) return;
-              void onCreateDoc({ linkedTaskId: task.id, title: docTitle.trim(), contentMd: docBody });
-              setDocTitle('');
-              setDocBody('');
-            }}
-            className="space-y-1.5"
-          >
-            <input
-              value={docTitle}
-              onChange={(e) => setDocTitle(e.target.value)}
-              placeholder="+ Judul catatan/dokumen..."
-              className="w-full px-2 py-1 rounded border outline-none"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-            <textarea
-              rows={2}
-              value={docBody}
-              onChange={(e) => setDocBody(e.target.value)}
-              placeholder="Isi catatan Markdown..."
-              className="w-full px-2 py-1 rounded border outline-none"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-            <button type="submit" className="px-2.5 py-1 rounded border cursor-pointer" style={{ borderColor: 'var(--border-subtle)' }}>
-              + Lampirkan Dokumen
-            </button>
+          <form className="grid gap-2 sm:grid-cols-2" onSubmit={(event) => void saveField(event)}>
+            <label className="ds-label">Nama kolom<input className="ds-field" required value={field.name} onChange={(event) => setField({ ...field, name: event.target.value })} /></label>
+            <label className="ds-label">Tipe kolom
+              <select className="ds-field" value={field.type} onChange={(event) => setField({ ...field, type: event.target.value as CustomField['type'], value: '' })}>
+                <option value="text">Teks</option><option value="number">Angka</option><option value="date">Tanggal</option>
+                <option value="select">Pilihan</option><option value="url">Tautan</option>
+              </select>
+            </label>
+            <label className="ds-label">Nilai<input className="ds-field" required type={field.type === 'select' ? 'text' : field.type} value={field.value} onChange={(event) => setField({ ...field, value: event.target.value })} /></label>
+            <Control type="submit" className="ds-control--outline self-end" disabled={!field.name.trim() || !field.value.trim()}>Simpan kolom</Control>
           </form>
-        </div>
+        </section>
 
         {(attachments.length > 0 || linkedChats.length > 0) && (
-          <div className="themed-card p-3 space-y-2 text-xs">
-            {attachments.length > 0 && (
-              <div>
-                <div className="font-semibold mb-1">📎 Lampiran ({attachments.length})</div>
-                {attachments.map((a) => (
-                  <div key={a.id} className="font-mono-num text-xs bg-black/25 px-2 py-1 rounded mb-1">
-                    📷 {a.name} ({a.source})
-                  </div>
-                ))}
-              </div>
-            )}
-            {linkedChats.length > 0 && (
-              <div>
-                <div className="font-semibold mb-1">💬 Chat Terjadwal Tertaut</div>
-                {linkedChats.map((m) => (
-                  <div key={m.id} className="bg-black/25 px-2 py-1 rounded mb-1">
-                    → {m.recipient_name} ({m.status})
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <section className="themed-card space-y-2 p-3 [overflow-wrap:anywhere]">
+            <h3 className="font-semibold">Lampiran & pesan tertaut</h3>
+            {attachments.map(({ id, name, source }) => <p key={id} className="text-sm">{name} · {source}</p>)}
+            {linkedChats.map(({ id, recipient_name, status }) => <p key={id} className="text-sm">{recipient_name} · {status}</p>)}
+          </section>
         )}
+        <footer className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs text-[var(--text-secondary)]">Waktu tercatat {Math.round(task.time_spent_seconds / 60)} mnt · Diundur {task.postponed_count} kali</span>
+          <Control className="ds-control--outline text-[var(--danger)]" onClick={() => setConfirmRemoval({ kind: 'task', id: task.id, title: task.title })}><Trash2 aria-hidden="true" /> Hapus tugas</Control>
+        </footer>
+      </fieldset>
 
-        <div className="flex items-center justify-between pt-2 border-t text-xs" style={{ borderColor: 'var(--border-subtle)' }}>
-          <span className="font-mono-num" style={{ color: 'var(--text-muted)' }}>
-            Waktu tercatat: {Math.round(task.time_spent_seconds / 60)}m · Ditunda: {task.postponed_count}x
-          </span>
-          <button
-            onClick={() => {
-              void onDeleteTask(task.id);
-              onClose();
-            }}
-            className="px-2.5 py-1 rounded bg-rose-500/20 text-rose-400 border border-rose-500/30 cursor-pointer"
-          >
-            Hapus Tugas
-          </button>
-        </div>
-      </div>
-    </div>
+      {confirmRemoval && (
+        <DialogPanel label="Konfirmasi penghapusan" className="workspace-form-dialog" onClose={() => { if (!action.pending) setConfirmRemoval(undefined); }}>
+          <div className="space-y-3 p-4">
+            <h3 className="text-base font-semibold">Hapus {confirmRemoval.kind === 'task' ? 'tugas' : 'dokumen'}?</h3>
+            <p className="text-sm [overflow-wrap:anywhere]">{confirmRemoval.title}</p>
+            {confirmRemoval.kind === 'task' && <p className="text-sm text-[var(--text-secondary)]">Subtugas, alarm, dan entri waktu dari tugas ini ikut dihapus.</p>}
+            {action.error && <p className="ds-note" role="alert">{action.error}</p>}
+            <div className="flex justify-end gap-2">
+              <Control disabled={!!action.pending} onClick={() => setConfirmRemoval(undefined)}>Batal</Control>
+              <Control disabled={!!action.pending} className="ds-control--outline text-[var(--danger)]" onClick={() => void remove()}>{action.pending ? 'Menghapus…' : 'Ya, hapus'}</Control>
+            </div>
+          </div>
+        </DialogPanel>
+      )}
+    </DialogPanel>
   );
 }

@@ -209,13 +209,17 @@ export interface AutoScheduleProposal {
  * Assigns open ClickUp tasks into free Deep Work slots today in WIB,
  * avoiding Notion/Calendar meetings and +-30 minutes around High-Impact news releases.
  */
-export function computeAutoScheduleForToday(applyImmediately = false): {
+export function computeAutoScheduleForToday(applyImmediately = false, now = new Date()): {
   dateWib: string;
   blockedWindows: Array<{ label: string; startMs: number; endMs: number }>;
   proposals: AutoScheduleProposal[];
 } {
   const db = getDb();
-  const today = todayWibIsoDate();
+  const today = todayWibIsoDate(now);
+  const dayStartMs = Date.parse(`${today}T08:00:00+07:00`);
+  const dayEndMs = Date.parse(`${today}T22:00:00+07:00`);
+  const dayStart = new Date(dayStartMs).toISOString();
+  const dayEnd = new Date(dayEndMs).toISOString();
 
   const openTasks = db
     .prepare(
@@ -232,18 +236,31 @@ export function computeAutoScheduleForToday(applyImmediately = false): {
 
   // Block non-task calendar events (Notion meetings, local events)
   const calEvents = db
-    .prepare("SELECT title, start_at, end_at FROM calendar_events WHERE source != 'clickup_task' AND start_at LIKE ?")
-    .all(`${today}%`) as Array<{ title: string; start_at: string; end_at: string | null }>;
-  for (const ev of calEvents) {
-    const s = Date.parse(ev.start_at);
-    const e = ev.end_at ? Date.parse(ev.end_at) : s + 60 * 60_000;
-    if (!Number.isNaN(s)) blockedWindows.push({ label: ev.title, startMs: s, endMs: e });
+    .prepare(`
+      SELECT title, start_at, end_at, all_day FROM calendar_events
+      WHERE source != 'clickup_task' AND julianday(start_at) < julianday(?)
+      AND CASE
+        WHEN julianday(end_at) > julianday(start_at) AND all_day = 0 THEN julianday(end_at)
+        ELSE MAX(COALESCE(julianday(end_at), julianday(start_at)),
+                 julianday(start_at) + CASE all_day WHEN 1 THEN 1 ELSE 1.0 / 24 END)
+      END > julianday(?)
+    `)
+    .all(dayEnd, dayStart) as Array<{ title: string; start_at: string; end_at: string | null; all_day: number }>;
+  for (const event of calEvents) {
+    const startMs = Date.parse(event.start_at);
+    const explicitEnd = Date.parse(event.end_at ?? '');
+    const endMs = event.all_day === 1 ? Math.max(explicitEnd || startMs, startMs + 86_400_000)
+      : explicitEnd > startMs ? explicitEnd : startMs + 3_600_000;
+    blockedWindows.push({ label: event.title, startMs, endMs });
   }
 
   // Block +-30m around High-Impact Economic Events (CPI, NFP, FOMC)
   const highNews = db
-    .prepare("SELECT event_name, scheduled_at FROM economic_events WHERE impact = 'high' AND scheduled_at LIKE ?")
-    .all(`${today}%`) as Array<{ event_name: string; scheduled_at: string }>;
+    .prepare(`
+      SELECT event_name, scheduled_at FROM economic_events
+      WHERE impact = 'high' AND julianday(scheduled_at) BETWEEN julianday(?, '-30 minutes') AND julianday(?, '+30 minutes')
+    `)
+    .all(dayStart, dayEnd) as Array<{ event_name: string; scheduled_at: string }>;
   for (const n of highNews) {
     const t = Date.parse(n.scheduled_at);
     if (!Number.isNaN(t)) {
@@ -255,12 +272,7 @@ export function computeAutoScheduleForToday(applyImmediately = false): {
     }
   }
 
-  const dayStartMs = Date.parse(`${today}T08:00:00+07:00`);
-  const dayEndMs = Date.parse(`${today}T22:00:00+07:00`);
-  let cursorMs = Math.max(dayStartMs, Math.ceil(Date.now() / (15 * 60_000)) * 15 * 60_000);
-  if (cursorMs > dayEndMs - 30 * 60_000) {
-    cursorMs = dayStartMs;
-  }
+  let cursorMs = Math.max(dayStartMs, Math.ceil(now.valueOf() / (15 * 60_000)) * 15 * 60_000);
 
   const proposals: AutoScheduleProposal[] = [];
 
@@ -282,12 +294,6 @@ export function computeAutoScheduleForToday(applyImmediately = false): {
           blockEnd,
           reason: `Blok ${durMin}m bebas bentrok rapat & rilis High-Impact`,
         });
-        if (applyImmediately) {
-          updateTask(task.id, {
-            autoScheduledBlockStart: blockStart,
-            autoScheduledBlockEnd: blockEnd,
-          });
-        }
         cursorMs = candidateEnd + 15 * 60_000; // 15m recovery buffer
         break;
       }
@@ -295,5 +301,20 @@ export function computeAutoScheduleForToday(applyImmediately = false): {
     }
   }
 
+  if (applyImmediately) applyAutoSchedulePlan(proposals);
   return { dateWib: today, blockedWindows, proposals };
+}
+
+export function applyAutoSchedulePlan(proposals: AutoScheduleProposal[]): void {
+  const db = getDb();
+  db.exec('SAVEPOINT apply_schedule');
+  try {
+    for (const { taskId, blockStart, blockEnd } of proposals) {
+      updateTask(taskId, { autoScheduledBlockStart: blockStart, autoScheduledBlockEnd: blockEnd });
+    }
+    db.exec('RELEASE apply_schedule');
+  } catch (error) {
+    db.exec('ROLLBACK TO apply_schedule; RELEASE apply_schedule');
+    throw error;
+  }
 }

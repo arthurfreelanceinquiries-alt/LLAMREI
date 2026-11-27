@@ -1,639 +1,411 @@
-import { useState, useMemo } from 'react';
+import { AlarmClock, CalendarDays, ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
+import { useMemo, useState, type DragEvent, type FormEvent } from 'react';
+import { shiftCalendarEnd } from '../../../shared/calendar-range';
+import { addCalendarDays, formatDay, formatWibStamp, formatWibTime, wibDateKey, wibDateTimeInput, wibDateTimeToIso } from '../../lib/calendar-time';
 import type { CalendarEventItem } from '../../types/llamrei';
+import { Control } from '../ui/Control';
+import { DialogPanel } from '../ui/DialogPanel';
+
+export interface CalendarEventInput {
+  title: string;
+  startAt: string;
+  endAt?: string | null;
+  withHardAlarm: boolean;
+  ringPhone?: boolean;
+}
 
 interface Props {
   calendarEvents: CalendarEventItem[];
+  now: Date;
+  initialEventId?: string;
   onMoveCalendarEvent: (eventId: string, newStartAt: string) => Promise<void>;
-  onCreateCalendarEvent: (input: { title: string; startAt: string; withHardAlarm: boolean }) => Promise<void>;
+  onCreateCalendarEvent: (input: CalendarEventInput) => Promise<void>;
+  onOpenTask: (taskId: string) => void;
 }
 
-function getWibDateParts(date: Date = new Date()) {
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Jakarta',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  const [yearStr, monthStr, dayStr] = formatter.format(date).split('-');
-  return {
-    year: Number(yearStr),
-    month: Number(monthStr) - 1, // 0-indexed
-    day: Number(dayStr),
-    dateStr: `${yearStr}-${monthStr}-${dayStr}`,
-  };
+const modes = { day: 'Hari', week: 'Minggu', month: 'Bulan', agenda: 'Agenda' } as const;
+type Mode = keyof typeof modes;
+
+const sourceNames: Record<CalendarEventItem['source'], string> = {
+  clickup_task: 'Tugas',
+  local: 'Lokal',
+  notion: 'Notion',
+  google: 'Google Calendar',
+  scheduled_chat: 'Pesan terjadwal',
+};
+const dayNames = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+const monthFormat = new Intl.DateTimeFormat('id-ID', { timeZone: 'UTC', month: 'long', year: 'numeric' });
+const dragMime = 'application/x-llamrei-calendar-event';
+const outline = 'ds-control--outline';
+
+function intervalEnd(start: string, end: string | null, allDay?: number): number {
+  const first = Date.parse(start);
+  // Events without an end occupy their start instant, or the whole day for all-day events.
+  const finish = end ? Date.parse(end) : first;
+  return Math.max(first + (allDay === 1 ? 86_400_000 : 1), Number.isFinite(finish) ? finish : first);
 }
 
-function toWibDateStr(isoString: string): string {
-  try {
-    const d = new Date(isoString);
-    if (Number.isNaN(d.getTime())) return '';
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Jakarta',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    return formatter.format(d);
-  } catch {
-    return '';
-  }
+function eventsOnDay(events: CalendarEventItem[], day: string): CalendarEventItem[] {
+  const start = Date.parse(`${day}T00:00:00+07:00`);
+  const end = start + 86_400_000;
+  return events.filter((item) => Date.parse(item.start_at) < end && intervalEnd(item.start_at, item.end_at, item.all_day) > start);
 }
 
-function toWibTimeString(isoString: string): string {
-  try {
-    const d = new Date(isoString);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleTimeString('id-ID', {
-      timeZone: 'Asia/Jakarta',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return '';
-  }
+function offsetMonth(key: string, delta: number): string {
+  const date = new Date(`${key.slice(0, 7)}-01T00:00:00Z`);
+  date.setUTCMonth(date.getUTCMonth() + delta);
+  return date.toISOString().slice(0, 10);
 }
 
-const MONTH_NAMES_ID = [
-  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
-];
+function monthDays(key: string): string[] {
+  const first = `${key.slice(0, 7)}-01`;
+  const offset = (new Date(`${first}T00:00:00Z`).getUTCDay() + 6) % 7;
+  const last = addCalendarDays(offsetMonth(first, 1), -1);
+  const cells = Math.ceil((Number(last.slice(-2)) + offset) / 7) * 7;
+  return Array.from({ length: cells }, (_, index) => addCalendarDays(first, index - offset));
+}
 
-const DAY_NAMES_ID = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
-const DAY_SHORT_ID = ['SEN', 'SEL', 'RAB', 'KAM', 'JUM', 'SAB', 'MIN'];
+function weekDays(key: string): string[] {
+  const offset = (new Date(`${key}T00:00:00Z`).getUTCDay() + 6) % 7;
+  return Array.from({ length: 7 }, (_, index) => addCalendarDays(key, index - offset));
+}
+
+function eventTime(event: CalendarEventItem, day: string): string {
+  if (event.all_day === 1) return 'Sepanjang hari';
+  if (wibDateKey(event.start_at) < day) return 'Berlanjut';
+  const start = formatWibTime(event.start_at);
+  return event.end_at && Date.parse(event.end_at) > Date.parse(event.start_at)
+    ? `${start}–${formatWibTime(event.end_at)} WIB`
+    : `${start} WIB`;
+}
 
 export function InteractiveVisualCalendar({
-  calendarEvents,
-  onMoveCalendarEvent,
-  onCreateCalendarEvent,
+  calendarEvents, now, initialEventId, onMoveCalendarEvent, onCreateCalendarEvent, onOpenTask,
 }: Props) {
-  const todayWib = useMemo(() => getWibDateParts(new Date()), []);
+  const today = wibDateKey(now);
+  const initialEvent = calendarEvents.find(({ id }) => id === initialEventId);
+  const [date, setDate] = useState(() => (initialEvent && wibDateKey(initialEvent.start_at)) || today);
+  const [mode, setMode] = useState<Mode>('month');
+  const [detail, setDetail] = useState<{ id: string; targetDate?: string } | null>(() =>
+    initialEvent ? { id: initialEvent.id } : null);
+  const [creating, setCreating] = useState(false);
+  const events = useMemo(() => calendarEvents
+    .filter(({ start_at }) => !!wibDateKey(start_at))
+    .sort((left, right) => Date.parse(left.start_at) - Date.parse(right.start_at)), [calendarEvents]);
+  const selected = events.find(({ id }) => id === detail?.id);
+  const displayedDays = mode === 'month' ? monthDays(date)
+    : mode === 'week' ? weekDays(date) : [];
+  const selectedEvents = eventsOnDay(events, date);
+  const month = date.slice(0, 7);
+  const agenda = mode === 'agenda'
+    ? monthDays(date).filter((day) => day.startsWith(month)).map((day) => ({ day, items: eventsOnDay(events, day) }))
+      .filter(({ items }) => items.length > 0)
+    : [{ day: date, items: selectedEvents }];
+  const heading = mode === 'day' ? formatDay(date)
+    : mode === 'week' ? `${formatDay(displayedDays[0])} – ${formatDay(displayedDays[6])}`
+    : monthFormat.format(new Date(`${date}T00:00:00Z`));
 
-  const [currentYear, setCurrentYear] = useState(todayWib.year);
-  const [currentMonth, setCurrentMonth] = useState(todayWib.month);
-  const [viewMode, setViewMode] = useState<'month' | 'week'>('month');
-  const [selectedDateStr, setSelectedDateStr] = useState<string>(todayWib.dateStr);
+  function navigate(delta: number) {
+    setDate((current) => mode === 'month' || mode === 'agenda'
+      ? offsetMonth(current, delta) : addCalendarDays(current, delta * (mode === 'week' ? 7 : 1)));
+  }
 
-  // Quick event add in selected date
-  const [quickTitle, setQuickTitle] = useState('');
-  const [quickTime, setQuickTime] = useState('10:00');
-  const [quickHardAlarm, setQuickHardAlarm] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Navigate month
-  const prevMonth = () => {
-    if (currentMonth === 0) {
-      setCurrentMonth(11);
-      setCurrentYear((y) => y - 1);
-    } else {
-      setCurrentMonth((m) => m - 1);
-    }
-  };
-
-  const nextMonth = () => {
-    if (currentMonth === 11) {
-      setCurrentMonth(0);
-      setCurrentYear((y) => y + 1);
-    } else {
-      setCurrentMonth((m) => m + 1);
-    }
-  };
-
-  const jumpToToday = () => {
-    setCurrentYear(todayWib.year);
-    setCurrentMonth(todayWib.month);
-    setSelectedDateStr(todayWib.dateStr);
-  };
-
-  // Group events by date string
-  const eventsByDate = useMemo(() => {
-    const map = new Map<string, CalendarEventItem[]>();
-    for (const ev of calendarEvents) {
-      const dStr = toWibDateStr(ev.start_at);
-      if (!dStr) continue;
-      const list = map.get(dStr) ?? [];
-      list.push(ev);
-      map.set(dStr, list);
-    }
-    // Sort events on each day chronologically
-    for (const list of map.values()) {
-      list.sort((a, b) => Date.parse(a.start_at) - Date.parse(b.start_at));
-    }
-    return map;
-  }, [calendarEvents]);
-
-  // Generate Month Grid (42 cells: 6 rows of 7 days, starting Monday)
-  const monthGridDays = useMemo(() => {
-    const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
-    // Sunday is 0 -> Monday = 0, Sunday = 6
-    const firstDayIndex = (firstDayOfMonth.getDay() + 6) % 7;
-    const daysInCurrentMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-    const daysInPrevMonth = new Date(currentYear, currentMonth, 0).getDate();
-
-    const days: Array<{
-      dateStr: string;
-      dayNumber: number;
-      isCurrentMonth: boolean;
-      isToday: boolean;
-      isSelected: boolean;
-      events: CalendarEventItem[];
-    }> = [];
-
-    // Prev month padding
-    for (let i = firstDayIndex - 1; i >= 0; i--) {
-      const dayNum = daysInPrevMonth - i;
-      const m = currentMonth === 0 ? 11 : currentMonth - 1;
-      const y = currentMonth === 0 ? currentYear - 1 : currentYear;
-      const dStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-      days.push({
-        dateStr: dStr,
-        dayNumber: dayNum,
-        isCurrentMonth: false,
-        isToday: dStr === todayWib.dateStr,
-        isSelected: dStr === selectedDateStr,
-        events: eventsByDate.get(dStr) ?? [],
-      });
-    }
-
-    // Current month days
-    for (let dayNum = 1; dayNum <= daysInCurrentMonth; dayNum++) {
-      const dStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-      days.push({
-        dateStr: dStr,
-        dayNumber: dayNum,
-        isCurrentMonth: true,
-        isToday: dStr === todayWib.dateStr,
-        isSelected: dStr === selectedDateStr,
-        events: eventsByDate.get(dStr) ?? [],
-      });
-    }
-
-    // Next month padding to fill complete weeks (35 or 42 cells)
-    const totalCells = days.length <= 35 ? 35 : 42;
-    const remaining = totalCells - days.length;
-    for (let dayNum = 1; dayNum <= remaining; dayNum++) {
-      const m = currentMonth === 11 ? 0 : currentMonth + 1;
-      const y = currentMonth === 11 ? currentYear + 1 : currentYear;
-      const dStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-      days.push({
-        dateStr: dStr,
-        dayNumber: dayNum,
-        isCurrentMonth: false,
-        isToday: dStr === todayWib.dateStr,
-        isSelected: dStr === selectedDateStr,
-        events: eventsByDate.get(dStr) ?? [],
-      });
-    }
-
-    return days;
-  }, [currentYear, currentMonth, todayWib.dateStr, selectedDateStr, eventsByDate]);
-
-  // Generate Week View Days (7 days around selected date)
-  const weekDays = useMemo(() => {
-    const sel = new Date(selectedDateStr + 'T12:00:00+07:00');
-    if (Number.isNaN(sel.getTime())) return [];
-    const dayOfWeek = (sel.getDay() + 6) % 7; // Monday = 0
-    const mondayMs = sel.getTime() - dayOfWeek * 86_400_000;
-
-    const days: Array<{
-      dateStr: string;
-      dayNumber: number;
-      dayName: string;
-      monthName: string;
-      isToday: boolean;
-      isSelected: boolean;
-      events: CalendarEventItem[];
-    }> = [];
-
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(mondayMs + i * 86_400_000);
-      const parts = getWibDateParts(d);
-      days.push({
-        dateStr: parts.dateStr,
-        dayNumber: parts.day,
-        dayName: DAY_NAMES_ID[i],
-        monthName: MONTH_NAMES_ID[parts.month],
-        isToday: parts.dateStr === todayWib.dateStr,
-        isSelected: parts.dateStr === selectedDateStr,
-        events: eventsByDate.get(parts.dateStr) ?? [],
-      });
-    }
-    return days;
-  }, [selectedDateStr, todayWib.dateStr, eventsByDate]);
-
-  const selectedDayEvents = eventsByDate.get(selectedDateStr) ?? [];
-
-  const handleQuickAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!quickTitle.trim() || isSubmitting) return;
-    setIsSubmitting(true);
-    try {
-      const iso = `${selectedDateStr}T${quickTime}:00+07:00`;
-      await onCreateCalendarEvent({
-        title: quickTitle.trim(),
-        startAt: new Date(iso).toISOString(),
-        withHardAlarm: quickHardAlarm,
-      });
-      setQuickTitle('');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const shiftEvent = (ev: CalendarEventItem, deltaMinutes: number) => {
-    const startMs = Date.parse(ev.start_at);
-    if (Number.isNaN(startMs)) return;
-    const nextStart = new Date(startMs + deltaMinutes * 60_000).toISOString();
-    void onMoveCalendarEvent(ev.id, nextStart);
-  };
+  function previewDrop(event: DragEvent, day: string) {
+    const id = event.dataTransfer.getData(dragMime);
+    if (!events.some((item) => item.id === id)) return;
+    event.preventDefault();
+    setDate(day);
+    setDetail({ id, targetDate: day });
+  }
 
   return (
-    <div className="themed-card p-4 space-y-4 border rounded-lg shadow-sm" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-card)' }}>
-      {/* CALENDAR HEADER & NAVIGATION CONTROLS */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b" style={{ borderColor: 'var(--border-subtle)' }}>
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-lg" style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}>
-            📅
+    <div className="min-w-0 space-y-4">
+      <section aria-label="Navigasi tanggal" className="themed-card min-w-0 overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] p-3 sm:p-4">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold capitalize leading-snug" aria-live="polite">{heading}</h2>
+            <p className="text-xs text-[var(--text-secondary)]">Waktu Indonesia Barat (WIB)</p>
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold tracking-wide">
-                {MONTH_NAMES_ID[currentMonth]} {currentYear}
-              </h2>
-              <span className="text-[10px] font-mono-num px-2 py-0.5 rounded border uppercase" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}>
-                WIB (UTC+7)
-              </span>
-            </div>
-            <div className="text-xs flex items-center gap-2" style={{ color: 'var(--text-muted)' }}>
-              <span>Total {calendarEvents.length} Acara Terjadwal</span>
-              <span>•</span>
-              <span className="text-emerald-400 font-mono-num">Hari Ini: {todayWib.day} {MONTH_NAMES_ID[todayWib.month]} {todayWib.year}</span>
-            </div>
+          <div className="flex flex-wrap gap-1">
+            <Control className={outline} aria-label="Periode sebelumnya" onClick={() => navigate(-1)}><ChevronLeft aria-hidden="true" /></Control>
+            <Control className={outline} onClick={() => setDate(today)}>Hari ini</Control>
+            <Control className={outline} aria-label="Periode berikutnya" onClick={() => navigate(1)}><ChevronRight aria-hidden="true" /></Control>
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Month / Week Toggle */}
-          <div className="flex rounded p-0.5 border" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-void)' }}>
-            <button
-              onClick={() => setViewMode('month')}
-              className={`px-3 py-1 rounded text-xs font-mono-num transition cursor-pointer ${viewMode === 'month' ? 'font-bold shadow' : 'text-stone-400 hover:text-white'}`}
-              style={viewMode === 'month' ? { background: 'var(--accent)', color: 'var(--accent-fg)' } : {}}
-            >
-              Bulan
-            </button>
-            <button
-              onClick={() => setViewMode('week')}
-              className={`px-3 py-1 rounded text-xs font-mono-num transition cursor-pointer ${viewMode === 'week' ? 'font-bold shadow' : 'text-stone-400 hover:text-white'}`}
-              style={viewMode === 'week' ? { background: 'var(--accent)', color: 'var(--accent-fg)' } : {}}
-            >
-              Minggu
-            </button>
-          </div>
-
-          {/* Navigation Buttons */}
-          <div className="flex items-center gap-1">
-            <button
-              onClick={prevMonth}
-              className="px-2.5 py-1 rounded border text-xs font-mono-num hover:bg-white/10 cursor-pointer"
-              style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-void)' }}
-              title="Bulan Sebelumnya"
-            >
-              ◀ Prev
-            </button>
-            <button
-              onClick={jumpToToday}
-              className="px-3 py-1 rounded border text-xs font-mono-num font-semibold hover:bg-white/10 cursor-pointer text-amber-300"
-              style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-void)' }}
-            >
-              Hari Ini
-            </button>
-            <button
-              onClick={nextMonth}
-              className="px-2.5 py-1 rounded border text-xs font-mono-num hover:bg-white/10 cursor-pointer"
-              style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-void)' }}
-              title="Bulan Berikutnya"
-            >
-              Next ▶
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* MONTH VIEW GRID */}
-      {viewMode === 'month' && (
-        <div className="space-y-1">
-          {/* Days of Week Header */}
-          <div className="grid grid-cols-7 gap-1 text-center font-mono-num text-[11px] font-bold py-1.5 rounded" style={{ background: 'var(--bg-void)', color: 'var(--text-secondary)' }}>
-            {DAY_NAMES_ID.map((name, idx) => (
-              <div key={name} className="py-0.5">
-                <span className="hidden md:inline">{name}</span>
-                <span className="md:hidden">{DAY_SHORT_ID[idx]}</span>
-              </div>
+          <div role="group" aria-label="Tampilan kalender" className="flex w-full flex-wrap gap-1">
+            {(Object.keys(modes) as Mode[]).map((item) => (
+              <Control key={item} className="ds-segment" aria-pressed={mode === item} onClick={() => setMode(item)}>{modes[item]}</Control>
             ))}
           </div>
-
-          {/* 7x5 or 7x6 Day Cells Grid */}
-          <div className="grid grid-cols-7 gap-1">
-            {monthGridDays.map((cell) => {
-              const hasEvents = cell.events.length > 0;
-              const hasAlarm = cell.events.some((e) => e.has_hard_alarm === 1);
-
-              return (
-                <div
-                  key={cell.dateStr}
-                  onClick={() => setSelectedDateStr(cell.dateStr)}
-                  className={`min-h-[96px] p-1.5 rounded border flex flex-col justify-between transition cursor-pointer select-none group ${
-                    cell.isSelected
-                      ? 'ring-2 ring-emerald-400 bg-white/5'
-                      : cell.isToday
-                      ? 'bg-emerald-950/20 border-emerald-500/50'
-                      : cell.isCurrentMonth
-                      ? 'bg-black/30 hover:bg-white/5'
-                      : 'bg-black/10 opacity-40 hover:opacity-75'
-                  }`}
-                  style={{
-                    borderColor: cell.isSelected ? 'var(--accent)' : cell.isToday ? '#10b981' : 'var(--border-subtle)',
-                  }}
-                >
-                  {/* Date Number & Badges Header */}
-                  <div className="flex items-center justify-between mb-1">
-                    <span
-                      className={`text-xs font-mono-num font-bold px-1.5 py-0.2 rounded ${
-                        cell.isToday
-                          ? 'bg-emerald-500 text-black font-extrabold shadow-sm'
-                          : cell.isSelected
-                          ? 'bg-white/20 text-white'
-                          : cell.isCurrentMonth
-                          ? 'text-stone-300'
-                          : 'text-stone-500'
-                      }`}
-                    >
-                      {cell.dayNumber}
-                    </span>
-
-                    <div className="flex items-center gap-0.5">
-                      {hasAlarm && <span className="text-[10px]" title="Memiliki Hard Alarm">⏰</span>}
-                      {hasEvents && (
-                        <span
-                          className="text-[9px] font-mono-num px-1 rounded-full font-bold"
-                          style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
-                        >
-                          {cell.events.length}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Day Events Chips (up to 3 items, then +N more) */}
-                  <div className="space-y-1 flex-1 overflow-hidden">
-                    {cell.events.slice(0, 2).map((ev) => (
-                      <div
-                        key={ev.id}
-                        className="text-[10px] px-1.5 py-0.5 rounded truncate font-medium flex items-center gap-1 shadow-xs border-l-2"
-                        style={{
-                          background: 'rgba(0, 0, 0, 0.45)',
-                          borderLeftColor: ev.color || 'var(--accent)',
-                          color: 'var(--text-primary)',
-                        }}
-                        title={`${toWibTimeString(ev.start_at)} WIB - ${ev.title}`}
-                      >
-                        <span className="font-mono-num text-[9px] text-stone-400 shrink-0">
-                          {toWibTimeString(ev.start_at)}
-                        </span>
-                        <span className="truncate">{ev.title}</span>
-                      </div>
-                    ))}
-                    {cell.events.length > 2 && (
-                      <div className="text-[9px] font-mono-num text-stone-400 pl-1">
-                        +{cell.events.length - 2} acara lagi...
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Cell Hover hint */}
-                  {cell.isToday && (
-                    <div className="text-[9px] font-mono-num text-emerald-400 font-bold uppercase mt-1 tracking-wider">
-                      • Hari Ini
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
         </div>
-      )}
 
-      {/* WEEK VIEW GRID */}
-      {viewMode === 'week' && (
-        <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
-          {weekDays.map((day) => (
-            <div
-              key={day.dateStr}
-              onClick={() => setSelectedDateStr(day.dateStr)}
-              className={`p-2.5 rounded border min-h-[220px] flex flex-col justify-between transition cursor-pointer ${
-                day.isSelected
-                  ? 'ring-2 ring-emerald-400 bg-white/5'
-                  : day.isToday
-                  ? 'bg-emerald-950/20 border-emerald-500/50'
-                  : 'bg-black/30 hover:bg-white/5'
-              }`}
-              style={{
-                borderColor: day.isSelected ? 'var(--accent)' : day.isToday ? '#10b981' : 'var(--border-subtle)',
-              }}
-            >
-              <div>
-                <div className="flex items-center justify-between pb-1.5 border-b mb-2" style={{ borderColor: 'var(--border-subtle)' }}>
-                  <div>
-                    <div className="text-xs font-bold text-stone-300">{day.dayName}</div>
-                    <div className="text-[10px] font-mono-num text-stone-400">{day.dayNumber} {day.monthName}</div>
-                  </div>
-                  {day.isToday && (
-                    <span className="text-[9px] font-mono-num px-1.5 py-0.5 rounded bg-emerald-500 text-black font-extrabold">
-                      HARI INI
-                    </span>
-                  )}
-                </div>
-
-                {/* Event list for this day */}
-                <div className="space-y-1.5">
-                  {day.events.length === 0 ? (
-                    <div className="text-[11px] text-stone-500 italic py-2">Tidak ada acara</div>
-                  ) : (
-                    day.events.map((ev) => (
-                      <div
-                        key={ev.id}
-                        className="p-1.5 rounded border-l-2 bg-black/40 text-xs space-y-0.5"
-                        style={{ borderLeftColor: ev.color || 'var(--accent)' }}
-                      >
-                        <div className="font-semibold truncate">
-                          {ev.has_hard_alarm === 1 ? '⏰ ' : ''}
-                          {ev.title}
-                        </div>
-                        <div className="text-[10px] font-mono-num text-stone-400 flex items-center justify-between">
-                          <span>{toWibTimeString(ev.start_at)} WIB</span>
-                          <span className="uppercase text-[9px] px-1 rounded bg-white/5">{ev.source}</span>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="text-[10px] font-mono-num text-stone-500 pt-2 border-t mt-2" style={{ borderColor: 'var(--border-subtle)' }}>
-                {day.events.length} Acara
-              </div>
+        {displayedDays.length > 0 && (
+          <div className="min-w-0">
+            <div className="grid grid-cols-7 border-b border-[var(--border-subtle)] text-center text-xs font-semibold text-[var(--text-secondary)]" aria-hidden="true">
+              {dayNames.map((label) => <span key={label} className="py-2">{label}</span>)}
             </div>
-          ))}
-        </div>
-      )}
-
-      {/* SELECTED DATE AGENDA DETAILS & QUICK ADD PANEL */}
-      <div className="p-3 rounded-lg border bg-black/25 grid grid-cols-1 lg:grid-cols-3 gap-3" style={{ borderColor: 'var(--border-subtle)' }}>
-        {/* Left 2 Cols: Detailed events on selected date */}
-        <div className="lg:col-span-2 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono-num font-bold text-emerald-400">
-                📌 AGENDA TANGGAL: {selectedDateStr}
-              </span>
-              {selectedDateStr === todayWib.dateStr && (
-                <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500 text-black font-bold">
-                  HARI INI
-                </span>
-              )}
-            </div>
-            <span className="text-xs font-mono-num text-stone-400">
-              {selectedDayEvents.length} Acara Terdaftar
-            </span>
-          </div>
-
-          {selectedDayEvents.length === 0 ? (
-            <div className="p-4 rounded border border-dashed text-xs text-stone-400 text-center" style={{ borderColor: 'var(--border-subtle)' }}>
-              Belum ada agenda di tanggal ini. Gunakan form di sebelah kanan untuk menambahkan acara baru langsung ke tanggal {selectedDateStr}.
-            </div>
-          ) : (
-            <div className="space-y-1.5 max-h-52 overflow-y-auto themed-scroll pr-1">
-              {selectedDayEvents.map((ev) => (
-                <div
-                  key={ev.id}
-                  className="p-2 rounded bg-black/40 border-l-4 flex items-center justify-between gap-2 text-xs"
-                  style={{ borderLeftColor: ev.color || 'var(--accent)' }}
-                >
-                  <div className="min-w-0">
-                    <div className="font-semibold truncate">
-                      {ev.has_hard_alarm === 1 ? '⏰ ' : ''}
-                      {ev.title}
-                    </div>
-                    <div className="font-mono-num text-stone-400 text-[11px] flex items-center gap-2">
-                      <span>Jam {toWibTimeString(ev.start_at)} WIB</span>
-                      <span>•</span>
-                      <span className="uppercase text-[9px] px-1.5 py-0.2 rounded bg-white/5 border border-white/10">
-                        {ev.source}
+            <div className="grid grid-cols-7">
+              {displayedDays.map((day) => {
+                const items = eventsOnDay(events, day);
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    aria-label={`${formatDay(day)}, ${items.length} agenda`}
+                    aria-pressed={day === date}
+                    aria-current={day === today ? 'date' : undefined}
+                    onClick={() => setDate(day)}
+                    onDragOver={(event) => { if (event.dataTransfer.types.includes(dragMime)) event.preventDefault(); }}
+                    onDrop={(event) => previewDrop(event, day)}
+                    className="group relative flex min-h-12 min-w-0 flex-col items-center border-r border-b border-[var(--border-subtle)] px-0.5 py-1.5 text-sm hover:bg-[var(--bg-elevated)] focus-visible:z-10 focus-visible:outline-offset-[-2px] aria-pressed:bg-[var(--accent-soft)] sm:min-h-20 sm:items-stretch sm:px-1.5"
+                  >
+                    <span className="flex items-center justify-between gap-1">
+                      <span className={`grid size-6 place-items-center rounded-md font-semibold ${day === today ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : day.startsWith(month) ? '' : 'text-[var(--text-muted)]'}`}>
+                        {Number(day.slice(-2))}
                       </span>
-                      {ev.notes && <span className="truncate text-stone-500">({ev.notes})</span>}
-                    </div>
-                  </div>
+                      {items.length > 0 && <span className="hidden rounded bg-[var(--bg-elevated)] px-1.5 text-xs text-[var(--text-secondary)] sm:block">{items.length}</span>}
+                    </span>
+                    <span className="mt-1 w-full space-y-0.5 text-left" aria-hidden="true">
+                      {items.length > 0 && <span className="mx-auto block size-1.5 rounded-full bg-[var(--accent)] sm:hidden" />}
+                      {items.slice(0, 2).map((event) => (
+                        <span key={event.id} className="hidden truncate rounded-sm border-l-2 bg-[var(--bg-elevated)] px-1 py-0.5 text-xs sm:block" style={{ borderColor: event.color }}>
+                          {event.title}
+                        </span>
+                      ))}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </section>
 
-                  <div className="flex items-center gap-1 shrink-0 font-mono-num text-[11px]">
-                    <button
-                      onClick={() => shiftEvent(ev, -30)}
-                      className="px-1.5 py-0.5 rounded border hover:bg-white/10 cursor-pointer"
-                      style={{ borderColor: 'var(--border-subtle)' }}
-                      title="Majukan 30 menit"
-                    >
-                      -30m
-                    </button>
-                    <button
-                      onClick={() => shiftEvent(ev, 30)}
-                      className="px-1.5 py-0.5 rounded border hover:bg-white/10 cursor-pointer"
-                      style={{ borderColor: 'var(--border-subtle)' }}
-                      title="Mundurkan 30 menit"
-                    >
-                      +30m
-                    </button>
-                  </div>
-                </div>
+      <section aria-labelledby="calendar-agenda" className="themed-card p-3 sm:p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 id="calendar-agenda" className="text-base font-semibold">{mode === 'agenda' ? 'Agenda bulan ini' : 'Agenda tanggal dipilih'}</h2>
+            {mode !== 'agenda' && <p className="text-sm capitalize text-[var(--text-secondary)]">{formatDay(date)}</p>}
+          </div>
+          <Control className="ds-control--primary" onClick={() => setCreating(true)}><Plus aria-hidden="true" /> Agenda baru</Control>
+        </div>
+
+        {mode === 'day' && today === date && (
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--accent)]">
+            {formatWibTime(now)} WIB <span className="h-px flex-1 bg-[var(--border-accent)]" />
+          </div>
+        )}
+        {!agenda.some(({ items }) => items.length) && (
+          <p className="rounded-lg border border-dashed border-[var(--border-subtle)] p-4 text-sm text-[var(--text-secondary)]">Belum ada agenda pada periode ini.</p>
+        )}
+        {agenda.map(({ day, items }) => items.length ? (
+          <div key={day} className="mb-3 last:mb-0">
+            {mode === 'agenda' && <h3 className="mb-1 text-sm font-semibold capitalize">{formatDay(day)}</h3>}
+            <ul className="divide-y divide-[var(--border-subtle)]">
+              {items.map((item) => (
+                <li key={item.id}>
+                  <button
+                    type="button" draggable
+                    onDragStart={(event) => { event.dataTransfer.setData(dragMime, item.id); event.dataTransfer.effectAllowed = 'move'; }}
+                    onClick={() => setDetail({ id: item.id })}
+                    className="flex min-h-12 w-full min-w-0 items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-[var(--bg-elevated)]"
+                  >
+                    <span className="h-7 w-0.5 shrink-0 rounded" style={{ background: item.color }} aria-hidden="true" />
+                    <span className="grid min-w-0 flex-1 gap-0.5">
+                      <span className="flex min-w-0 flex-wrap items-center gap-2 text-sm font-semibold [overflow-wrap:anywhere]">{item.title} {item.has_hard_alarm === 1 && <AlarmClock size={14} aria-label="Alarm tertaut" />}</span>
+                      <span className="text-xs text-[var(--text-secondary)]">{eventTime(item, day)} · {sourceNames[item.source]}</span>
+                    </span>
+                    <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-[var(--text-secondary)]" />
+                  </button>
+                </li>
               ))}
+            </ul>
+          </div>
+        ) : null)}
+      </section>
+
+      {creating && (
+        <NewEventDialog date={date} events={events} onSave={onCreateCalendarEvent} onClose={() => setCreating(false)} />
+      )}
+      {selected && (
+        <EventDetail
+          key={selected.id}
+          event={selected}
+          events={events}
+          targetDate={detail?.targetDate}
+          onMove={async (startAt) => {
+            await onMoveCalendarEvent(selected.id, startAt);
+            setDate(wibDateKey(startAt));
+          }}
+          onOpenTask={onOpenTask}
+          onClose={() => setDetail(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function DialogHeading({ title, onClose }: { title: string; onClose: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-2">
+      <h2 className="text-base font-semibold">{title}</h2>
+      <Control aria-label="Tutup" onClick={onClose}><X aria-hidden="true" /></Control>
+    </div>
+  );
+}
+
+function ScheduleConflicts({ events, startAt, endAt, eventId, allDay }: {
+  events: CalendarEventItem[];
+  startAt: string;
+  endAt: string | null;
+  eventId?: string;
+  allDay?: number;
+}) {
+  const start = Date.parse(startAt);
+  const end = intervalEnd(startAt, endAt, allDay);
+  const conflicts = events.filter((event) => event.id !== eventId &&
+    Date.parse(event.start_at) < end && intervalEnd(event.start_at, event.end_at, event.all_day) > start);
+  if (!conflicts.length) return null;
+  return (
+    <div className="ds-note" role="status">
+      <p className="font-semibold text-[var(--warning)]">Bertabrakan dengan {conflicts.length} agenda</p>
+      <ul className="list-disc pl-5">
+        {conflicts.slice(0, 3).map((event) => <li key={event.id}>{event.title} · {formatWibStamp(event.start_at)}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+function NewEventDialog({ date, events, onSave, onClose }: {
+  date: string;
+  events: CalendarEventItem[];
+  onSave: Props['onCreateCalendarEvent'];
+  onClose: () => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [start, setStart] = useState(`${date}T09:00`);
+  const [end, setEnd] = useState('');
+  const [withAlarm, setWithAlarm] = useState(false);
+  const [ringPhone, setRingPhone] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const startAt = wibDateTimeToIso(start);
+  const endAt = end ? wibDateTimeToIso(end) : null;
+  const invalidRange = !!end && (!startAt || !endAt || Date.parse(endAt) < Date.parse(startAt));
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!title.trim() || !startAt || invalidRange || saving) return;
+    setError('');
+    setSaving(true);
+    try {
+      await onSave({ title: title.trim(), startAt, endAt, withHardAlarm: withAlarm, ringPhone: withAlarm && ringPhone });
+      onClose();
+    } catch {
+      setError('Agenda belum dapat disimpan. Periksa koneksi dan coba lagi.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DialogPanel label="Agenda baru" className="workspace-form-dialog" onClose={() => { if (!saving) onClose(); }}>
+      <DialogHeading title="Agenda baru" onClose={() => { if (!saving) onClose(); }} />
+      <form className="space-y-3 p-4" onSubmit={(event) => void submit(event)}>
+        <label className="ds-label">Judul agenda<input autoFocus className="ds-field" required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="ds-label">Mulai (WIB)<input className="ds-field" type="datetime-local" required value={start} onChange={(event) => setStart(event.target.value)} /></label>
+          <label className="ds-label">Selesai (WIB, opsional)<input className="ds-field" type="datetime-local" min={start} value={end} onChange={(event) => setEnd(event.target.value)} /></label>
+        </div>
+        <label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={withAlarm} onChange={(event) => setWithAlarm(event.target.checked)} /> Pasang hard alarm</label>
+        {withAlarm && <label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={ringPhone} onChange={(event) => setRingPhone(event.target.checked)} /> Sertakan ponsel melalui NectarLink</label>}
+        {startAt && !invalidRange && <ScheduleConflicts events={events} startAt={startAt} endAt={endAt} />}
+        {invalidRange && <p className="ds-note" role="alert">Jam selesai harus sama dengan atau setelah jam mulai.</p>}
+        {error && <p className="ds-note" role="alert">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Control disabled={saving} onClick={onClose}>Batal</Control>
+          <Control type="submit" disabled={saving || !startAt || !title.trim() || invalidRange} className="ds-control--primary">{saving ? 'Menyimpan…' : 'Simpan agenda'}</Control>
+        </div>
+      </form>
+    </DialogPanel>
+  );
+}
+
+function EventDetail({ event, events, targetDate, onMove, onOpenTask, onClose }: {
+  event: CalendarEventItem;
+  events: CalendarEventItem[];
+  targetDate?: string;
+  onMove: (startAt: string) => Promise<void>;
+  onOpenTask: Props['onOpenTask'];
+  onClose: () => void;
+}) {
+  const original = wibDateTimeInput(event.start_at);
+  const allDay = event.all_day === 1;
+  const initialInput = allDay ? original.slice(0, 10) : original;
+  const [draft, setDraft] = useState(() => !targetDate ? initialInput : allDay ? targetDate : `${targetDate}${original.slice(10)}`);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const startAt = wibDateTimeToIso(allDay ? `${draft}${original.slice(10)}` : draft);
+  const endAt = startAt ? shiftCalendarEnd(event.start_at, event.end_at, startAt) : null;
+  const changed = draft !== initialInput;
+
+  function shift(minutes: number) {
+    const time = Date.parse(startAt ?? event.start_at) + minutes * 60_000;
+    setDraft(wibDateTimeInput(new Date(time)));
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!startAt || !changed || saving) return;
+    setError('');
+    setSaving(true);
+    try {
+      await onMove(startAt);
+      onClose();
+    } catch {
+      setError('Perubahan jadwal belum tersimpan. Coba lagi setelah memeriksa koneksi.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DialogPanel label="Detail agenda" className="workspace-form-dialog" onClose={() => { if (!saving) onClose(); }}>
+      <DialogHeading title="Detail agenda" onClose={() => { if (!saving) onClose(); }} />
+      <div className="space-y-4 p-4">
+        <div className="space-y-1 [overflow-wrap:anywhere]">
+          <p className="flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)]"><CalendarDays size={14} aria-hidden="true" /> {sourceNames[event.source]}</p>
+          <h3 className="text-lg font-semibold">{event.title}</h3>
+          <p className="text-sm text-[var(--text-secondary)]">{allDay ? formatDay(wibDateKey(event.start_at)) : formatWibStamp(event.start_at)}{allDay ? ' · Sepanjang hari' : ''}</p>
+          {event.end_at && !allDay && <p className="text-sm text-[var(--text-secondary)]">Selesai {formatWibStamp(event.end_at)}</p>}
+          {event.location && <p className="text-sm">{event.location}</p>}
+          {event.notes && <p className="whitespace-pre-wrap text-sm text-[var(--text-secondary)]">{event.notes}</p>}
+          {event.linked_task_id && <Control className={outline} onClick={() => { onClose(); onOpenTask(event.linked_task_id!); }}>Buka tugas</Control>}
+        </div>
+        <form onSubmit={(event) => void submit(event)} className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
+          <h4 className="text-sm font-semibold">Ubah jadwal</h4>
+          {(event.source === 'notion' || event.source === 'google') && <p className="text-sm text-[var(--text-secondary)]">Perubahan berlaku pada salinan kalender di LLAMREI.</p>}
+          <label className="ds-label">{allDay ? 'Tanggal baru (WIB)' : 'Mulai baru (WIB)'}<input className="ds-field" type={allDay ? 'date' : 'datetime-local'} required value={draft} onChange={(event) => setDraft(event.target.value)} /></label>
+          {!allDay && (
+            <div className="flex flex-wrap gap-2">
+              <Control className={outline} onClick={() => shift(-30)}>−30 mnt</Control>
+              <Control className={outline} onClick={() => shift(30)}>+30 mnt</Control>
             </div>
           )}
-        </div>
-
-        {/* Right 1 Col: Quick Add Event directly into Selected Date */}
-        <div className="space-y-2 border-t lg:border-t-0 lg:border-l lg:pl-3 pt-2 lg:pt-0" style={{ borderColor: 'var(--border-subtle)' }}>
-          <div className="text-xs font-mono-num font-bold text-stone-300">
-            + Tambah Acara di {selectedDateStr}
+          {changed && startAt && (
+            <>
+              <p className="text-sm text-[var(--text-secondary)]">
+                Jadwal baru {formatWibStamp(startAt)}{endAt ? ` sampai ${formatWibStamp(endAt)}` : ''}.
+                {event.has_hard_alarm === 1 && ' Alarm tertaut ikut bergeser.'}
+              </p>
+              <ScheduleConflicts eventId={event.id} events={events} startAt={startAt} endAt={endAt} allDay={event.all_day} />
+            </>
+          )}
+          {error && <p className="ds-note" role="alert">{error}</p>}
+          <div className="flex justify-end">
+            <Control type="submit" className="ds-control--primary" disabled={!changed || !startAt || saving}>{saving ? 'Menyimpan…' : 'Simpan jadwal'}</Control>
           </div>
-
-          <form onSubmit={handleQuickAdd} className="space-y-2 text-xs">
-            <input
-              value={quickTitle}
-              onChange={(e) => setQuickTitle(e.target.value)}
-              placeholder="Judul agenda..."
-              className="w-full px-2.5 py-1.5 rounded border outline-none text-xs"
-              style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-            />
-
-            <div className="flex items-center gap-2">
-              <label className="text-[11px] font-mono-num text-stone-400 shrink-0">Jam WIB:</label>
-              <input
-                type="time"
-                value={quickTime}
-                onChange={(e) => setQuickTime(e.target.value)}
-                className="flex-1 px-2 py-1 rounded border font-mono-num text-xs"
-                style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
-              />
-            </div>
-
-            <label className="flex items-center gap-1.5 cursor-pointer text-stone-300 text-[11px]">
-              <input
-                type="checkbox"
-                checked={quickHardAlarm}
-                onChange={(e) => setQuickHardAlarm(e.target.checked)}
-                className="rounded cursor-pointer"
-              />
-              <span>⏰ Pasang Hard Alarm</span>
-            </label>
-
-            <button
-              type="submit"
-              disabled={isSubmitting || !quickTitle.trim()}
-              className="w-full py-1.5 rounded font-mono-num font-bold text-xs cursor-pointer transition disabled:opacity-50"
-              style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
-            >
-              {isSubmitting ? 'Menyimpan...' : `+ Simpan ke ${selectedDateStr}`}
-            </button>
-          </form>
-        </div>
+        </form>
       </div>
-
-      {/* LEGEND FOOTER */}
-      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 text-[11px] font-mono-num border-t text-stone-400" style={{ borderColor: 'var(--border-subtle)' }}>
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />
-            <span>Hari Ini</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-indigo-400 inline-block" />
-            <span>ClickUp Task</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-purple-400 inline-block" />
-            <span>Notion Calendar</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
-            <span>Trading / CPI</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="text-xs">⏰</span>
-            <span>Hard Alarm Aktif</span>
-          </span>
-        </div>
-        <div className="text-[10px] text-stone-500">
-          💡 Tips: Klik tanggal manapun di kalender untuk melihat detail atau menjadwalkan acara
-        </div>
-      </div>
-    </div>
+    </DialogPanel>
   );
 }

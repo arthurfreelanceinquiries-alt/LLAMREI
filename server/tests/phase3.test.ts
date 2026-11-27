@@ -119,8 +119,9 @@ test('Linked Docs, Gantt/Workload, CSV formula neutralization & CSV/Markdown Imp
 
     // 4. Gantt & Weekly Workload
     const gantt = getGanttAndWorkloadSummary();
-    assert.ok(gantt.timelineTasks.length >= 4);
-    assert.ok(gantt.weeklyWorkload.length >= 1);
+    assert.ok(gantt.timelineTasks.some(({ id }) => id === 'task_bab4'));
+    assert.ok(!gantt.timelineTasks.some(({ id }) => id === evilTask.id), 'unscheduled tasks must stay out of the timeline');
+    assert.equal(gantt.weeklyWorkload.length, 7);
   } finally {
     cleanup();
   }
