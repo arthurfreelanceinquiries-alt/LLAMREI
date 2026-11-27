@@ -17,3 +17,7 @@ Real accounts, devices, Tailscale infrastructure, Tauri packaging and Android ex
 ## Phase 01 batch 1 — fallback vault
 
 The commit titled `fix(security): protect the fallback secrets vault` adds a random owner-only key, authenticated encryption, atomic rotation of legacy ciphertext on access, and serialization across processes. Three isolated vault tests passed. They cover legacy decryption and migration, restoration using the ciphertext and key on a disposable copy, and concurrent writers. Missing or corrupt keys leave the existing ciphertext intact. Back up both the key and ciphertext. The original host and user are needed to unlock a legacy vault before its first upgrade. Live libsecret and Windows ACLs remain unverified.
+
+## Phase 01 batch 2 — proxy and browser authentication
+
+The commit titled `fix(auth): require credentials for forwarded API requests` retains localhost and Vite access, plus bearer-authenticated API clients. Private Tailscale Serve can use the opt-in browser session described in the README. The session requires a configured HTTPS origin, uses a Secure HttpOnly cookie, checks origin for writes, expires after one hour, and revokes active SSE streams on sign-out. Seven focused auth and Phase 2 tests passed. A synthetic trusted TLS proxy verified sign-in, API access, and revocation, and Chromium rendered the sign-in flow through a test relay that retained upstream TLS verification. Live Tailscale and Android sessions remain unverified.

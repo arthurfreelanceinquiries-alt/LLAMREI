@@ -1,3 +1,5 @@
+export const API_SESSION_REQUIRED = 'llamrei:api-session-required';
+
 export async function apiRequest<T = unknown>(
   url: string,
   options?: { method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: unknown },
@@ -8,6 +10,7 @@ export async function apiRequest<T = unknown>(
     body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
   });
   if (!res.ok) {
+    if (res.status === 401 && url.startsWith('/api/')) window.dispatchEvent(new Event(API_SESSION_REQUIRED));
     const errText = await res.text();
     throw new Error(errText || `HTTP ${res.status}`);
   }
