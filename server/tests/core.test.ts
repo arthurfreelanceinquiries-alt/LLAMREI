@@ -87,13 +87,15 @@ test('ClickUp Task ↔ Website Calendar ↔ 2-Tier Alarm bi-directional sync & p
   }
 });
 
-test('Deep Work Time Tracker triggers Auto-DND on paired NectarLink device', async () => {
+test('Deep Work Time Tracker remains usable when the opted-in phone is offline', async () => {
   const cleanup = setupIsolatedEnv();
   try {
     const started = await startTaskTimer('task_bab4');
     assert.ok(started);
     const devAfterStart = await import('../services/nectarlink.service.ts').then((m) => m.getPhoneHubState().devices[0]);
-    assert.equal(devAfterStart.dnd_enabled, 1);
+    assert.equal(devAfterStart.auto_dnd_on_deepwork, 1);
+    assert.equal(devAfterStart.online, 0);
+    assert.equal(devAfterStart.dnd_enabled, 0);
 
     const stopped = await stopTaskTimer('task_bab4');
     assert.ok(stopped.durationSeconds >= 1);

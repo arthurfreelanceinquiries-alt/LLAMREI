@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isIP } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getDb } from '../db/connection.ts';
@@ -77,7 +78,8 @@ export function discoverLocalApiToken(): NectarLinkTokenConfig | null {
     if (!fs.existsSync(file)) continue;
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { port?: number; token?: string };
-      if (parsed.port && parsed.token) {
+      if (typeof parsed.port === 'number' && Number.isInteger(parsed.port) && parsed.port >= 1 && parsed.port <= 65535 &&
+          typeof parsed.token === 'string' && parsed.token.trim()) {
         return { port: parsed.port, token: parsed.token, path: file };
       }
     } catch {
@@ -87,15 +89,38 @@ export function discoverLocalApiToken(): NectarLinkTokenConfig | null {
   return null;
 }
 
+type TransportStatus = 'accepted' | 'offline' | 'failed' | 'unknown';
+type CommandStatus = TransportStatus | 'saved' | 'unsupported';
+type CommandVia = 'nectarlink_api' | 'nectarlink_cli' | 'local' | 'unavailable';
+
+export interface NectarLinkCommandResult {
+  ok: boolean;
+  via: CommandVia;
+  status: CommandStatus;
+  message: string;
+}
+
+const outcomeMessages: Record<CommandStatus, string> = {
+  accepted: 'Permintaan diterima NectarLink. Konfirmasi dari perangkat belum tersedia.',
+  offline: 'NectarLink belum tersedia di komputer ini.',
+  failed: 'NectarLink menolak permintaan.',
+  unknown: 'Hasil perintah tidak diketahui. Periksa perangkat sebelum mengulangi.',
+  saved: 'Preferensi disimpan di LLAMREI.',
+  unsupported: 'Perintah ini belum didukung oleh integrasi NectarLink.',
+};
+
+function commandResult(status: CommandStatus, via: CommandVia, message = outcomeMessages[status]): NectarLinkCommandResult {
+  return { ok: status === 'saved', via, status, message };
+}
+
 async function callNectarLinkLocalApi<T = unknown>(
   method: 'GET' | 'POST',
   endpoint: string,
   body?: unknown,
-): Promise<{ ok: boolean; via: 'nectarlink_api' | 'simulated_fallback'; data?: T; error?: string }> {
+): Promise<{ status: TransportStatus; via: 'nectarlink_api' | 'unavailable'; data?: T }> {
   const cfg = discoverLocalApiToken();
-  if (!cfg) {
-    return { ok: false, via: 'simulated_fallback', error: 'nectarlink_token_not_found' };
-  }
+  if (!cfg) return { status: 'offline', via: 'unavailable' };
+  const via = 'nectarlink_api';
   try {
     const res = await fetch(`http://127.0.0.1:${cfg.port}${endpoint}`, {
       method,
@@ -105,29 +130,32 @@ async function callNectarLinkLocalApi<T = unknown>(
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(2500),
+      redirect: 'error',
     });
-    const data = (await res.json()) as T;
-    return { ok: res.ok, via: 'nectarlink_api', data };
+    const data = await res.json().catch(() => undefined) as T | undefined;
+    if (res.ok) {
+      const rejected = data != null && typeof data === 'object' && 'ok' in data && data.ok === false;
+      return { status: rejected ? 'failed' : 'accepted', via, data };
+    }
+    return { status: res.status >= 400 && res.status < 500 && res.status !== 408 ? 'failed' : 'unknown', via };
   } catch (err) {
-    return {
-      ok: false,
-      via: 'simulated_fallback',
-      error: err instanceof Error ? err.message : 'nectarlink_unreachable',
-    };
+    const failure = err as { cause?: { code?: string } };
+    return { status: failure.cause?.code === 'ECONNREFUSED' ? 'offline' : 'unknown', via };
   }
 }
 
-async function runNectarLinkCli(args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+async function runNectarLinkCli(args: string[]): Promise<NectarLinkCommandResult> {
   try {
-    const { stdout, stderr } = await execFileAsync('nectarlink', args, { timeout: 5000 });
-    return { ok: true, stdout, stderr };
+    await execFileAsync('nectarlink', args, { timeout: 5000 });
+    return commandResult('accepted', 'nectarlink_cli');
   } catch (err) {
-    return {
-      ok: false,
-      stdout: '',
-      stderr: err instanceof Error ? err.message : 'nectarlink_cli_missing',
-    };
+    return commandResult((err as NodeJS.ErrnoException).code === 'ENOENT' ? 'offline' : 'unknown', 'nectarlink_cli');
   }
+}
+
+async function postPhoneCommand(endpoint: string, body: unknown): Promise<NectarLinkCommandResult> {
+  const { status, via } = await callNectarLinkLocalApi('POST', endpoint, body);
+  return commandResult(status, via);
 }
 
 export function getPhoneHubState(): {
@@ -170,7 +198,8 @@ export async function syncDevicesFromNectarLink(): Promise<{ synced: boolean; de
     }>;
   }>('GET', '/v1/devices');
 
-  if (apiRes.ok && apiRes.data?.devices) {
+  const synced = apiRes.status === 'accepted' && Array.isArray(apiRes.data?.devices);
+  if (synced && apiRes.data?.devices) {
     const upsert = db.prepare(
       `INSERT INTO paired_devices (id, name, platform, online, link_type, battery_level, battery_charging, last_seen_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -196,7 +225,7 @@ export async function syncDevicesFromNectarLink(): Promise<{ synced: boolean; de
   }
 
   const devices = db.prepare('SELECT * FROM paired_devices ORDER BY online DESC').all() as unknown as PairedDeviceRow[];
-  return { synced: apiRes.ok, devices };
+  return { synced, devices };
 }
 
 export function addTimelineEntry(params: {
@@ -228,25 +257,20 @@ export function addTimelineEntry(params: {
   sseBus.emit('phone:timeline', { id, title: params.title, kind: params.kind });
 }
 
-export async function ringPhone(deviceName?: string): Promise<{ ok: boolean; via: string }> {
-  const res = await callNectarLinkLocalApi('POST', '/v1/ring', deviceName ? { device: deviceName } : {});
-  addTimelineEntry({
-    deviceName: deviceName ?? 'Infinix NOTE 30 Pro',
-    kind: 'alarm',
-    direction: 'outgoing',
-    title: 'Find Phone / Ring Triggered',
-    detail: res.ok ? 'Diteruskan via NectarLink Local API' : 'Disimulasikan (NectarLink daemon offline)',
-  });
-  return { ok: true, via: res.via };
+export async function ringPhone(deviceName?: string): Promise<NectarLinkCommandResult> {
+  const result = await postPhoneCommand('/v1/ring', deviceName ? { device: deviceName } : {});
+  if (result.status === 'accepted') {
+    addTimelineEntry({ deviceName, kind: 'alarm', direction: 'outgoing', title: 'Permintaan Find Phone', detail: result.message });
+  }
+  return result;
 }
 
-export async function pushPhoneNotification(params: {
+export function pushPhoneNotification(params: {
   title: string;
   body: string;
   device?: string;
-}): Promise<{ ok: boolean; via: string }> {
-  const res = await callNectarLinkLocalApi('POST', '/v1/notify', params);
-  return { ok: true, via: res.via };
+}): Promise<NectarLinkCommandResult> {
+  return postPhoneCommand('/v1/notify', params);
 }
 
 export async function sendToPhone(params: {
@@ -254,158 +278,106 @@ export async function sendToPhone(params: {
   paths?: string[];
   url?: string;
   text?: string;
-}): Promise<{ ok: boolean; via: string }> {
-  const res = await callNectarLinkLocalApi('POST', '/v1/send', params);
-  addTimelineEntry({
-    deviceName: params.device ?? 'Infinix NOTE 30 Pro',
-    kind: params.paths?.length ? 'file' : 'link',
-    direction: 'outgoing',
-    title: params.paths?.[0] ?? params.url ?? params.text ?? 'Send to Phone',
-    detail: `Via ${res.via}`,
-    targetPathOrUrl: params.url ?? params.paths?.[0] ?? null,
-  });
-  return { ok: true, via: res.via };
+}): Promise<NectarLinkCommandResult> {
+  const result = await postPhoneCommand('/v1/send', params);
+  if (result.status === 'accepted') {
+    addTimelineEntry({
+      deviceName: params.device,
+      kind: params.paths?.length ? 'file' : 'link',
+      direction: 'outgoing',
+      title: params.paths?.length ? 'Permintaan kirim berkas' : 'Permintaan kirim teks atau tautan',
+      detail: result.message,
+    });
+  }
+  return result;
 }
 
-export async function sendClipboardToPhone(text: string, device?: string): Promise<{ ok: boolean; via: string }> {
-  const res = await callNectarLinkLocalApi('POST', '/v1/clipboard', { text, ...(device ? { device } : {}) });
-  addTimelineEntry({
-    deviceName: device ?? 'Infinix NOTE 30 Pro',
-    kind: 'clip',
-    direction: 'outgoing',
-    title: `Clipboard pushed (${text.slice(0, 36)}${text.length > 36 ? '...' : ''})`,
-    detail: `Via ${res.via}`,
-  });
-  return { ok: true, via: res.via };
+export async function sendClipboardToPhone(text: string, device?: string): Promise<NectarLinkCommandResult> {
+  const result = await postPhoneCommand('/v1/clipboard', { text, ...(device ? { device } : {}) });
+  if (result.status === 'accepted') {
+    addTimelineEntry({ deviceName: device, kind: 'clip', direction: 'outgoing', title: 'Permintaan sinkron papan klip', detail: result.message });
+  }
+  return result;
 }
 
 export async function triggerCameraCapture(params: {
   mode: 'photo' | 'scan';
   device?: string;
   linkedTaskId?: string | null;
-}): Promise<{ ok: boolean; via: string; artifactLabel: string }> {
-  const db = getDb();
-  const res = await callNectarLinkLocalApi('POST', '/v1/camera', {
-    mode: params.mode,
-    ...(params.device ? { device: params.device } : {}),
-  });
-  const filename = `${params.mode}_${new Date().toISOString().slice(11, 19).replace(/:/g, '')}.jpg`;
-
-  if (params.linkedTaskId) {
-    const task = db.prepare('SELECT attachments_json FROM tasks WHERE id = ?').get(params.linkedTaskId) as
-      | { attachments_json: string }
-      | undefined;
-    if (task) {
-      const list = JSON.parse(task.attachments_json || '[]') as Array<Record<string, unknown>>;
-      list.push({
-        id: `att_${crypto.randomUUID().slice(0, 8)}`,
-        name: filename,
-        source: 'nectarlink_continuity_camera',
-        mode: params.mode,
-        createdAt: new Date().toISOString(),
-      });
-      db.prepare("UPDATE tasks SET attachments_json = ?, updated_at = datetime('now') WHERE id = ?").run(
-        JSON.stringify(list),
-        params.linkedTaskId,
-      );
-      sseBus.emit('workspace:update', { taskId: params.linkedTaskId });
-    }
+}): Promise<NectarLinkCommandResult & { artifactLabel: string | null }> {
+  if (params.mode !== 'photo' && params.mode !== 'scan') {
+    return { ...commandResult('failed', 'local', 'Mode kamera tidak valid.'), artifactLabel: null };
   }
-
-  addTimelineEntry({
-    deviceName: params.device ?? 'Infinix NOTE 30 Pro',
-    kind: params.mode === 'scan' ? 'scan' : 'photo',
-    direction: 'incoming',
-    title: filename,
-    detail: params.linkedTaskId ? `Continuity Camera → Dilampirkan ke Task ${params.linkedTaskId}` : `Continuity Camera (${params.mode})`,
-    linkedTaskId: params.linkedTaskId ?? null,
-  });
-
-  return { ok: true, via: res.via, artifactLabel: filename };
+  // The bridge does not provide an authenticated artifact for attachment here.
+  const result = await postPhoneCommand('/v1/camera', { mode: params.mode, ...(params.device ? { device: params.device } : {}) });
+  return { ...result, artifactLabel: null };
 }
 
-export async function startScreenMirror(deviceId?: string, appPackage?: string): Promise<{ ok: boolean; mode: string; note: string }> {
+export async function startScreenMirror(
+  deviceId?: string,
+  appPackage?: string,
+): Promise<NectarLinkCommandResult & { mode: string; note: string }> {
   const db = getDb();
   const dev = (deviceId
     ? db.prepare('SELECT * FROM paired_devices WHERE id = ?').get(deviceId)
-    : db.prepare('SELECT * FROM paired_devices LIMIT 1').get()) as unknown as PairedDeviceRow | undefined;
+    : db.prepare('SELECT * FROM paired_devices ORDER BY online DESC, last_seen_at DESC LIMIT 1').get()) as unknown as PairedDeviceRow | undefined;
+  if (!dev) {
+    const result = commandResult('failed', 'local', 'Perangkat tidak ditemukan.');
+    return { ...result, mode: 'unavailable', note: result.message };
+  }
 
-  const target = dev?.name ?? 'Infinix NOTE 30 Pro';
-  const cliArgs = ['mirror', target, '/tmp/llamrei_mirror_preview.h264', '--seconds', '30'];
+  const cliArgs = ['mirror', dev.name, '/tmp/llamrei_mirror_preview.h264', '--seconds', '30'];
   if (appPackage) cliArgs.push('--app', appPackage);
-  const cliRes = await runNectarLinkCli(cliArgs);
-
-  addTimelineEntry({
-    deviceId: dev?.id ?? null,
-    deviceName: target,
-    kind: 'mirror_session',
-    direction: 'session',
-    title: appPackage ? `App Window: ${appPackage}` : 'Screen Mirroring (Screencast 60fps)',
-    detail: cliRes.ok
-      ? 'Sesi Screencast aktif tanpa USB Debugging'
-      : 'Permintaan Screencast dicatat (pasang nectarlink CLI untuk stream native)',
-  });
-
-  return {
-    ok: true,
-    mode: cliRes.ok ? 'nectarlink_screencast' : 'ui_session_logged',
-    note: cliRes.ok ? 'Screencast dimulai tanpa Developer Mode.' : 'NectarLink CLI belum terpasang di PATH; sesi tercatat di timeline.',
-  };
+  const result = await runNectarLinkCli(cliArgs);
+  return { ...result, mode: result.status === 'accepted' ? 'nectarlink_cli_accepted' : 'unavailable', note: result.message };
 }
+
+const localPreferenceToggles: ReadonlySet<string> = new Set([
+  'auto_dnd_on_deepwork',
+  'phone_as_speaker',
+  'phone_sound_on_pc',
+]);
+
+const cliToggleMap = new Map([
+  ['dnd_enabled', 'dnd'],
+  ['torch_enabled', 'torch'],
+  ['wifi_enabled', 'wifi'],
+  ['bt_enabled', 'bluetooth'],
+  ['hotspot_enabled', 'hotspot'],
+]);
 
 export async function setPhoneControlToggle(
   deviceId: string,
-  toggleName:
-    | 'dnd_enabled'
-    | 'auto_dnd_on_deepwork'
-    | 'torch_enabled'
-    | 'wifi_enabled'
-    | 'bt_enabled'
-    | 'hotspot_enabled'
-    | 'phone_as_speaker'
-    | 'play_on_phone'
-    | 'phone_sound_on_pc',
+  toggleName: string,
   enabled: boolean,
-): Promise<PairedDeviceRow | null> {
+): Promise<NectarLinkCommandResult & { device: PairedDeviceRow | null }> {
   const db = getDb();
-  const allowedColumns = new Set([
-    'dnd_enabled',
-    'auto_dnd_on_deepwork',
-    'torch_enabled',
-    'wifi_enabled',
-    'bt_enabled',
-    'hotspot_enabled',
-    'phone_as_speaker',
-    'play_on_phone',
-    'phone_sound_on_pc',
-  ]);
-  if (!allowedColumns.has(toggleName)) return null;
-
-  db.prepare(`UPDATE paired_devices SET ${toggleName} = ? WHERE id = ?`).run(enabled ? 1 : 0, deviceId);
-  const dev = db.prepare('SELECT * FROM paired_devices WHERE id = ?').get(deviceId) as unknown as PairedDeviceRow | undefined;
-  if (!dev) return null;
-
-  const cliToggleMap: Record<string, string> = {
-    dnd_enabled: 'dnd',
-    torch_enabled: 'torch',
-    wifi_enabled: 'wifi',
-    bt_enabled: 'bluetooth',
-    hotspot_enabled: 'hotspot',
-  };
-  if (cliToggleMap[toggleName]) {
-    void runNectarLinkCli(['toggles', dev.name, 'set', cliToggleMap[toggleName], enabled ? 'on' : 'off']);
+  const getDevice = db.prepare('SELECT * FROM paired_devices WHERE id = ?');
+  const device = getDevice.get(deviceId) as unknown as PairedDeviceRow | undefined;
+  if (!device || typeof enabled !== 'boolean') {
+    return { ...commandResult('failed', 'local', 'Perangkat atau pengaturan tidak valid.'), device: device ?? null };
+  }
+  if (localPreferenceToggles.has(toggleName)) {
+    db.prepare(`UPDATE paired_devices SET ${toggleName} = ? WHERE id = ?`).run(enabled ? 1 : 0, deviceId);
+    const updated = getDevice.get(deviceId) as unknown as PairedDeviceRow;
+    sseBus.emit('phone:device_update', updated);
+    return { ...updated, ...commandResult('saved', 'local'), device: updated };
+  }
+  const cliToggle = cliToggleMap.get(toggleName);
+  if (cliToggle) {
+    const result = await runNectarLinkCli(['toggles', device.name, 'set', cliToggle, enabled ? 'on' : 'off']);
+    return { ...device, ...result, device };
   }
   if (toggleName === 'play_on_phone' && enabled) {
-    void callNectarLinkLocalApi('POST', '/v1/play-on-phone', {});
+    const result = await postPhoneCommand('/v1/play-on-phone', { device: device.name });
+    return { ...device, ...result, device };
   }
-
-  sseBus.emit('phone:device_update', dev);
-  return dev;
+  return { ...device, ...commandResult('unsupported', 'local'), device };
 }
 
 export async function setPhoneDndForDeepWork(enabled: boolean): Promise<void> {
   const db = getDb();
-  const dev = db.prepare('SELECT * FROM paired_devices WHERE auto_dnd_on_deepwork = 1 LIMIT 1').get() as
+  const dev = db.prepare('SELECT * FROM paired_devices WHERE auto_dnd_on_deepwork = 1 AND online = 1 LIMIT 1').get() as
     | PairedDeviceRow
     | undefined;
   if (!dev) return;
@@ -473,40 +445,21 @@ export function ingestPhoneNotification(params: {
   return row;
 }
 
-export async function replyPhoneNotification(notifId: string, replyText: string): Promise<{ ok: boolean; via: string; notification: PhoneNotificationRow | null }> {
+export async function replyPhoneNotification(
+  notifId: string,
+  replyText: string,
+): Promise<NectarLinkCommandResult & { notification: PhoneNotificationRow | null }> {
   const db = getDb();
   const notif = db.prepare('SELECT * FROM phone_notifications WHERE id = ?').get(notifId) as unknown as PhoneNotificationRow | undefined;
-  if (!notif) return { ok: false, via: 'not_found', notification: null };
+  if (!notif || !notif.can_reply || notif.dismissed || !notif.reply_action_id || typeof replyText !== 'string' || !replyText.trim()) {
+    return { ...commandResult('failed', 'local', 'Notifikasi tidak dapat dibalas atau isi balasan kosong.'), notification: notif ?? null };
+  }
 
-  const dev = db.prepare('SELECT name FROM paired_devices WHERE id = ?').get(notif.device_id ?? '') as
-    | { name: string }
-    | undefined;
-  const cliRes = await runNectarLinkCli([
-    'act',
-    dev?.name ?? 'Infinix NOTE 30 Pro',
-    notif.id,
-    notif.reply_action_id || 'reply',
-    '--reply',
-    replyText,
-  ]);
+  const dev = db.prepare('SELECT name FROM paired_devices WHERE id = ?').get(notif.device_id ?? '') as { name: string } | undefined;
+  if (!dev) return { ...commandResult('failed', 'local', 'Perangkat tidak ditemukan.'), notification: notif };
 
-  db.prepare("UPDATE phone_notifications SET replied_text = ?, replied_at = datetime('now') WHERE id = ?").run(
-    replyText,
-    notifId,
-  );
-
-  addTimelineEntry({
-    deviceId: notif.device_id,
-    deviceName: dev?.name ?? 'Infinix NOTE 30 Pro',
-    kind: 'reply',
-    direction: 'outgoing',
-    title: `Balas ${notif.app_name} → ${notif.sender_or_title}`,
-    detail: replyText,
-  });
-
-  const updated = db.prepare('SELECT * FROM phone_notifications WHERE id = ?').get(notifId) as unknown as PhoneNotificationRow;
-  sseBus.emit('phone:notification_updated', updated);
-  return { ok: true, via: cliRes.ok ? 'nectarlink_direct_reply' : 'queued_local_reply', notification: updated };
+  const result = await runNectarLinkCli(['act', dev.name, notif.id, notif.reply_action_id, '--reply', replyText]);
+  return { ...result, notification: notif };
 }
 
 export function dismissPhoneNotification(notifId: string): void {
@@ -515,18 +468,21 @@ export function dismissPhoneNotification(notifId: string): void {
   sseBus.emit('phone:notification_dismissed', { id: notifId });
 }
 
-export async function connectNectarLinkViaTailscale(deviceId: string, tailscaleIp: string, port = 41641): Promise<{ ok: boolean; message: string }> {
+export async function connectNectarLinkViaTailscale(
+  deviceId: string,
+  tailscaleIp: string,
+  port = 41641,
+): Promise<NectarLinkCommandResult> {
   const db = getDb();
-  const dev = db.prepare('SELECT * FROM paired_devices WHERE id = ?').get(deviceId) as unknown as PairedDeviceRow | undefined;
-  if (!dev) return { ok: false, message: 'Perangkat tidak ditemukan' };
+  const device = db.prepare('SELECT * FROM paired_devices WHERE id = ?').get(deviceId) as unknown as PairedDeviceRow | undefined;
+  const ipVersion = typeof tailscaleIp === 'string' ? isIP(tailscaleIp) : 0;
+  if (!device || ipVersion === 0 || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return commandResult('failed', 'local', 'Perangkat, alamat IP, atau port tidak valid.');
+  }
 
-  db.prepare("UPDATE paired_devices SET tailscale_ip = ?, active_transport = 'tailscale' WHERE id = ?").run(tailscaleIp, deviceId);
-  const cliRes = await runNectarLinkCli(['connect', dev.name, `${tailscaleIp}:${port}`]);
-  sseBus.emit('phone:device_update', { ...dev, tailscale_ip: tailscaleIp, active_transport: 'tailscale' });
-  return {
-    ok: true,
-    message: cliRes.ok
-      ? `NectarLink tersambung ke ${dev.name} via Tailscale (${tailscaleIp}:${port})`
-      : `Alamat Tailscale ${tailscaleIp}:${port} tersimpan untuk ${dev.name} (siap dipakai saat NectarLink CLI aktif)`,
-  };
+  db.prepare('UPDATE paired_devices SET tailscale_ip = ? WHERE id = ?').run(tailscaleIp, deviceId);
+  sseBus.emit('phone:device_update', { ...device, tailscale_ip: tailscaleIp });
+  const address = ipVersion === 6 ? `[${tailscaleIp}]:${port}` : `${tailscaleIp}:${port}`;
+  const result = await runNectarLinkCli(['connect', device.name, address]);
+  return { ...result, message: `Alamat Tailscale disimpan. ${result.message}` };
 }

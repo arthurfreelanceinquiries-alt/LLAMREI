@@ -16,6 +16,12 @@ import type {
   TimelineItem,
 } from '../../types/llamrei';
 
+export interface PhoneCommandFeedback {
+  ok: boolean;
+  status: 'accepted' | 'offline' | 'failed' | 'unknown' | 'saved' | 'unsupported';
+  message: string;
+}
+
 interface Props {
   apiConfigured: boolean;
   devices: PairedDeviceItem[];
@@ -25,17 +31,17 @@ interface Props {
   tasks: TaskItem[];
   alarms: AlarmReminderItem[];
   onSyncNectarLink: () => Promise<void>;
-  onRingPhone: () => Promise<void>;
-  onMirrorScreen: (deviceId: string) => Promise<{ note: string }>;
-  onSendFileOrLink: (payload: { url?: string; text?: string; paths?: string[] }) => Promise<void>;
-  onSendClipboard: (text: string) => Promise<void>;
-  onCameraCapture: (mode: 'photo' | 'scan') => Promise<{ artifactLabel: string }>;
-  onToggleControl: (deviceId: string, toggle: string, enabled: boolean) => Promise<void>;
-  onReplyNotification: (notifId: string, replyText: string) => Promise<void>;
+  onRingPhone: () => Promise<PhoneCommandFeedback>;
+  onMirrorScreen: (deviceId: string) => Promise<PhoneCommandFeedback>;
+  onSendFileOrLink: (payload: { url?: string; text?: string; paths?: string[] }) => Promise<PhoneCommandFeedback>;
+  onSendClipboard: (text: string) => Promise<PhoneCommandFeedback>;
+  onCameraCapture: (mode: 'photo' | 'scan') => Promise<PhoneCommandFeedback>;
+  onToggleControl: (deviceId: string, toggle: string, enabled: boolean) => Promise<PhoneCommandFeedback>;
+  onReplyNotification: (notifId: string, replyText: string) => Promise<PhoneCommandFeedback>;
   onDismissNotification: (notifId: string) => Promise<void>;
   onSimulateIncomingWa: (sender: string, group: string, body: string) => Promise<void>;
   onCreateTaskFromWaNotif: (notif: PhoneNotificationItem) => Promise<void>;
-  onConnectTailscalePeer: (deviceId: string, ip: string) => Promise<{ message: string }>;
+  onConnectTailscalePeer: (deviceId: string, ip: string) => Promise<PhoneCommandFeedback>;
   onReconcileMobileOutbox: (mutations: OfflineMutation[]) => Promise<void>;
   onToggleTaskDone: (task: TaskItem) => Promise<void>;
   onSnoozeAlarm: (alarmId: string, minutes: number) => Promise<void>;
@@ -69,6 +75,7 @@ export function PhoneHubView({
 }: Props) {
   const device = devices[0] ?? null;
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [pendingReplies, setPendingReplies] = useState<Record<string, boolean>>({});
   const [typeOnPhoneText, setTypeOnPhoneText] = useState('');
   const [clipText, setClipText] = useState('');
   const [sendUrlText, setSendUrlText] = useState('');
@@ -76,6 +83,17 @@ export function PhoneHubView({
   const [tsIpInput, setTsIpInput] = useState(device?.tailscale_ip ?? network.tailscale.peers[0]?.tailscaleIp ?? '100.64.0.22');
   const simSender = 'Koordinator Riset';
   const [simBody, setSimBody] = useState('@Arthur tolong cek data CPI sebelum jam 19:00 ya!');
+
+  const runPhoneCommand = async (action: () => Promise<PhoneCommandFeedback>) => {
+    try {
+      const result = await action();
+      setStatusBanner(result.message);
+      return result.status;
+    } catch {
+      setStatusBanner('Hasil permintaan tidak diketahui. Periksa perangkat sebelum mengulangi.');
+      return 'unknown';
+    }
+  };
 
   // Offline simulation state for the 4 Android Home Screen Widgets
   const [offlineSim, setOfflineSim] = useState(false);
@@ -174,7 +192,7 @@ export function PhoneHubView({
           className="px-3 py-2 rounded text-xs font-mono-num border flex items-center justify-between"
           style={{ background: 'var(--accent-soft)', borderColor: 'var(--border-accent)', color: 'var(--accent)' }}
         >
-          <span>{statusBanner}</span>
+          <span role="status">{statusBanner}</span>
           <button onClick={() => setStatusBanner(null)} className="ml-2 font-bold cursor-pointer">
             ✕
           </button>
@@ -193,22 +211,22 @@ export function PhoneHubView({
                 style={{ borderColor: 'var(--accent)', background: 'rgba(0,217,146,0.08)' }}
               >
                 <span className="text-base font-bold" style={{ color: 'var(--accent)' }}>
-                  {device?.battery_level ?? 84}%
+                  {device?.online === 1 ? `${device.battery_level}%` : '—'}
                 </span>
                 <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
                   {device?.battery_charging ? '⚡CHG' : 'BAT'}
                 </span>
               </div>
               <div className="space-y-1 min-w-0">
-                <div className="text-sm font-bold truncate">{device?.name ?? 'Infinix NOTE 30 Pro'}</div>
+                <div className="text-sm font-bold truncate">{device?.name ?? 'Belum ada perangkat'}</div>
                 <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                  {device?.android_version ?? 'Android 14'} ·{' '}
+                  {device?.android_version ?? 'Android'} ·{' '}
                   <span style={{ color: apiConfigured ? 'var(--accent)' : '#fbbf24' }}>
-                    {apiConfigured ? 'NectarLink API Active' : 'Standby Bridge Mode'}
+                    {apiConfigured ? 'NectarLink dikonfigurasi' : 'NectarLink belum dikonfigurasi'}
                   </span>
                 </div>
                 <div className="text-xs font-mono-num" style={{ color: 'var(--accent-2)' }}>
-                  📶 {device?.active_transport?.toUpperCase() ?? 'LAN'} · {device?.latency_ms ?? 4} ms
+                  {device?.online === 1 ? device.active_transport.toUpperCase() : 'Tidak ada koneksi terkonfirmasi'}
                 </div>
               </div>
             </div>
@@ -218,20 +236,21 @@ export function PhoneHubView({
                 MEDIA PLAYER SYNC
               </div>
               <div>
-                <div className="text-sm font-semibold truncate">{device?.media_title ?? 'Lofi Focus Beats'}</div>
+                <div className="text-sm font-semibold truncate">{device?.online === 1 && device.media_title ? device.media_title : 'Media tidak tersedia'}</div>
                 <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                  {device?.media_artist ?? 'ChilledCow'}
+                  {device?.online === 1 ? device.media_artist : null}
                 </div>
               </div>
               <div className="flex items-center gap-2 pt-1">
                 <button
-                  onClick={() =>
-                    device && void onToggleControl(device.id, 'play_on_phone', device.play_on_phone !== 1)
-                  }
+                  disabled={!device}
+                  onClick={() => {
+                    if (device) void runPhoneCommand(() => onToggleControl(device.id, 'play_on_phone', true));
+                  }}
                   className="px-2.5 py-1 rounded text-xs font-mono-num border cursor-pointer"
                   style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-elevated)' }}
                 >
-                  {device?.play_on_phone ? '⏸ Pause on Phone' : '▶ Play on Phone'}
+                  ▶ Putar di HP
                 </button>
               </div>
             </div>
@@ -240,24 +259,23 @@ export function PhoneHubView({
           {/* 4 Quick Action Tiles (Mirror Screen, Send Files, Send Clipboard, Find Phone) */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <button
-              onClick={async () => {
-                const res = await onMirrorScreen(device?.id ?? 'dev_infinix_note30');
-                setStatusBanner(res.note);
+              disabled={!device}
+              onClick={() => {
+                if (device) void runPhoneCommand(() => onMirrorScreen(device.id));
               }}
               className="themed-card p-3 text-left hover:border-white/30 space-y-1 cursor-pointer"
             >
               <div className="text-base">📲</div>
               <div className="text-xs font-bold">Mirror Screen</div>
               <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                60fps Tanpa Dev Mode
+                Minta tampilan layar HP
               </div>
             </button>
 
             <button
               onClick={async () => {
                 const url = sendUrlText.trim() || window.location.href;
-                await onSendFileOrLink({ url, text: 'Link dari Llamrei Desktop' });
-                setStatusBanner(`Terkirim ke HP via NectarLink: ${url}`);
+                await runPhoneCommand(() => onSendFileOrLink({ url, text: 'Link dari Llamrei Desktop' }));
               }}
               className="themed-card p-3 text-left hover:border-white/30 space-y-1 cursor-pointer"
             >
@@ -271,8 +289,7 @@ export function PhoneHubView({
             <button
               onClick={async () => {
                 const txt = clipText.trim() || 'Clipboard test dari Llamrei';
-                await onSendClipboard(txt);
-                setStatusBanner(`Clipboard disinkronkan ke HP: "${txt}"`);
+                await runPhoneCommand(() => onSendClipboard(txt));
               }}
               className="themed-card p-3 text-left hover:border-white/30 space-y-1 cursor-pointer"
             >
@@ -284,10 +301,7 @@ export function PhoneHubView({
             </button>
 
             <button
-              onClick={async () => {
-                await onRingPhone();
-                setStatusBanner('Sinyal Find Phone (Ring) dikirim ke HP!');
-              }}
+              onClick={() => void runPhoneCommand(onRingPhone)}
               className="themed-card p-3 text-left hover:border-white/30 space-y-1 cursor-pointer"
             >
               <div className="text-base">🔔</div>
@@ -386,7 +400,7 @@ export function PhoneHubView({
 
                   {n.replied_text && (
                     <div className="text-xs font-mono-num" style={{ color: 'var(--accent)' }}>
-                      ✓ Dibalas dari PC: "{n.replied_text}"
+                      Riwayat balasan: "{n.replied_text}"
                     </div>
                   )}
 
@@ -401,16 +415,20 @@ export function PhoneHubView({
                           style={{ background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
                         />
                         <button
+                          disabled={pendingReplies[n.id]}
                           onClick={async () => {
                             const txt = (replyDrafts[n.id] ?? '').trim();
                             if (!txt) return;
-                            await onReplyNotification(n.id, txt);
-                            setReplyDrafts((prev) => ({ ...prev, [n.id]: '' }));
+                            setPendingReplies((prev) => ({ ...prev, [n.id]: true }));
+                            const status = await runPhoneCommand(() => onReplyNotification(n.id, txt));
+                            if (status !== 'accepted' && status !== 'unknown') {
+                              setPendingReplies((prev) => ({ ...prev, [n.id]: false }));
+                            }
                           }}
                           className="px-2.5 py-1 rounded font-mono-num font-bold cursor-pointer"
                           style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
                         >
-                          Balas ↗
+                          {pendingReplies[n.id] ? 'Balasan belum terkonfirmasi' : 'Balas ↗'}
                         </button>
                       </>
                     )}
@@ -438,35 +456,50 @@ export function PhoneHubView({
               </div>
               <div className="grid grid-cols-3 gap-1.5">
                 {[
-                  { key: 'dnd_enabled', label: '🌙 DND', val: device.dnd_enabled },
-                  { key: 'torch_enabled', label: '🔦 Torch', val: device.torch_enabled },
-                  { key: 'wifi_enabled', label: '📶 Wi-Fi', val: device.wifi_enabled },
-                  { key: 'bt_enabled', label: 'ᛒ BT', val: device.bt_enabled },
-                  { key: 'hotspot_enabled', label: '📡 Hotspot', val: device.hotspot_enabled },
-                  { key: 'auto_dnd_on_deepwork', label: '⏱ Auto-DND', val: device.auto_dnd_on_deepwork },
-                ].map((c) => (
-                  <button
-                    key={c.key}
-                    onClick={() => void onToggleControl(device.id, c.key, c.val !== 1)}
-                    className="py-1.5 px-2 rounded border font-mono-num cursor-pointer"
-                    style={
-                      c.val === 1
-                        ? { background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--border-accent)' }
-                        : { background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }
-                    }
+                  { key: 'dnd_enabled', label: 'DND' },
+                  { key: 'torch_enabled', label: 'Senter' },
+                  { key: 'wifi_enabled', label: 'Wi-Fi' },
+                  { key: 'bt_enabled', label: 'Bluetooth' },
+                  { key: 'hotspot_enabled', label: 'Hotspot' },
+                ].map((control) => (
+                  <select
+                    key={control.key}
+                    aria-label={control.label}
+                    value=""
+                    onChange={(event) => {
+                      const enabled = event.currentTarget.value === 'on';
+                      void runPhoneCommand(() => onToggleControl(device.id, control.key, enabled));
+                    }}
+                    className="min-w-0 py-1.5 px-2 rounded border"
+                    style={{ background: 'var(--bg-void)', color: 'var(--text-primary)', borderColor: 'var(--border-subtle)' }}
                   >
-                    {c.label}
-                  </button>
+                    <option value="" disabled>{control.label}</option>
+                    <option value="on">Aktifkan</option>
+                    <option value="off">Matikan</option>
+                  </select>
                 ))}
+                <button
+                  type="button"
+                  aria-pressed={device.auto_dnd_on_deepwork === 1}
+                  onClick={() => void runPhoneCommand(() => onToggleControl(device.id, 'auto_dnd_on_deepwork', device.auto_dnd_on_deepwork !== 1))}
+                  className="py-1.5 px-2 rounded border font-mono-num cursor-pointer"
+                  style={
+                    device.auto_dnd_on_deepwork === 1
+                      ? { background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--border-accent)' }
+                      : { background: 'var(--bg-void)', borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }
+                  }
+                >
+                  Auto-DND
+                </button>
               </div>
               {[
-                { key: 'phone_as_speaker', label: 'Phone as speaker', val: device.phone_as_speaker },
-                { key: 'phone_sound_on_pc', label: 'Phone sound on this PC', val: device.phone_sound_on_pc },
+                { key: 'phone_as_speaker', label: 'Preferensi speaker HP', val: device.phone_as_speaker },
+                { key: 'phone_sound_on_pc', label: 'Preferensi audio HP di PC', val: device.phone_sound_on_pc },
               ].map((s) => (
                 <div key={s.key} className="flex items-center justify-between pt-1">
                   <span>{s.label}</span>
                   <button
-                    onClick={() => void onToggleControl(device.id, s.key, s.val !== 1)}
+                    onClick={() => void runPhoneCommand(() => onToggleControl(device.id, s.key, s.val !== 1))}
                     className="px-2 py-0.5 rounded font-mono-num text-xs cursor-pointer"
                     style={
                       s.val === 1
@@ -488,10 +521,7 @@ export function PhoneHubView({
             </div>
             <div className="grid grid-cols-2 gap-2">
               <button
-                onClick={async () => {
-                  const res = await onCameraCapture('scan');
-                  setStatusBanner(`Continuity Camera Scan tersimpan: ${res.artifactLabel}`);
-                }}
+                onClick={() => void runPhoneCommand(() => onCameraCapture('scan'))}
                 className="p-2 rounded border text-left cursor-pointer"
                 style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
               >
@@ -499,10 +529,7 @@ export function PhoneHubView({
                 <div style={{ color: 'var(--text-muted)' }}>Ke Clipboard / Task</div>
               </button>
               <button
-                onClick={async () => {
-                  const res = await onCameraCapture('photo');
-                  setStatusBanner(`Continuity Camera Photo tersimpan: ${res.artifactLabel}`);
-                }}
+                onClick={() => void runPhoneCommand(() => onCameraCapture('photo'))}
                 className="p-2 rounded border text-left cursor-pointer"
                 style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
               >
@@ -515,9 +542,7 @@ export function PhoneHubView({
               onSubmit={async (e) => {
                 e.preventDefault();
                 if (!typeOnPhoneText.trim()) return;
-                await onSendFileOrLink({ text: typeOnPhoneText.trim() });
-                setStatusBanner(`Teks dikirim ke keyboard HP: "${typeOnPhoneText.trim()}"`);
-                setTypeOnPhoneText('');
+                await runPhoneCommand(() => onSendFileOrLink({ text: typeOnPhoneText.trim() }));
               }}
               className="flex gap-1.5 pt-1"
             >
@@ -590,8 +615,7 @@ export function PhoneHubView({
             <button
               onClick={async () => {
                 if (!device) return;
-                const r = await onConnectTailscalePeer(device.id, tsIpInput);
-                setStatusBanner(r.message);
+                await runPhoneCommand(() => onConnectTailscalePeer(device.id, tsIpInput.trim()));
               }}
               className="px-2.5 py-1 rounded text-xs font-mono-num bg-purple-500/20 text-purple-300 border border-purple-500/40 cursor-pointer"
             >

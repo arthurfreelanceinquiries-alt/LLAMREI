@@ -503,13 +503,17 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
   if (method === 'POST' && /^\/api\/scheduler\/messages\/[^/]+\/approve$/.test(pathname)) {
     const msgId = pathname.split('/')[4];
     const body = await readJsonBody<{ messageBody?: string; scheduledAt?: string; channel?: OutboundChannel }>(req);
-    sendJson(res, 200, approveScheduledMessage(msgId, body));
+    const approved = approveScheduledMessage(msgId, body);
+    if (!approved) sendError(res, 409, 'Scheduled message approval was rejected');
+    else sendJson(res, 200, approved);
     return true;
   }
   if (method === 'PATCH' && /^\/api\/scheduler\/messages\/[^/]+\/status$/.test(pathname)) {
     const msgId = pathname.split('/')[4];
     const body = await readJsonBody<{ status: 'sent_manual_confirmed' | 'cancelled' | 'pending_approval' }>(req);
-    sendJson(res, 200, updateScheduledMessageStatus(msgId, body.status));
+    const updated = updateScheduledMessageStatus(msgId, body?.status);
+    if (!updated) sendError(res, 409, 'Scheduled message status change was rejected');
+    else sendJson(res, 200, updated);
     return true;
   }
   if (method === 'GET' && pathname === '/api/scheduler/contacts') {
