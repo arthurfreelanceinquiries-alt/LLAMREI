@@ -8,7 +8,8 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [x] Phase 03 workspace redesign and local acceptance checks.
 - [x] Phase 04 Cognitive Core and local acceptance checks.
 - [x] Phase 05 Knowledge Vault and personal memory local acceptance.
-- [ ] Phases 06–11 per master plan.
+- [ ] Phase 06 Unified Inbox and Composio.
+- [ ] Phases 07–11 per master plan.
 
 ## Phase 00
 
@@ -105,3 +106,11 @@ The Phase 05 branch starts from the tested Phase 04 tree `524c42f`. Node 24.22.3
 The commit titled `feat(memory): review and recall sourced notes in JARVIS` adds a Knowledge Vault workspace, previews and document provenance, tag and type filters, explicit recall consent, retention dates in WIB, and command-palette results. Selecting local memory in JARVIS keeps that turn on the local route and links cited notes to their vault entries. Recalled notes and eligible prior turns carry revision references. An edited, deleted, expired or withdrawn note is excluded from later model context. Existing replies stay visible in the user's conversation history.
 
 Typecheck, the production build and 61 tests passed. The vault loads on demand in a 4.72 kB gzipped JavaScript chunk. The main JavaScript chunk measured 137.92 kB gzipped. Server tests verified recall across sessions after restart, source provenance, exclusion from cloud requests, updated content, and revocation during a reply. Chromium exercised creation, edit, deletion confirmation, document import and source navigation, keyboard search, local recall, expiration and hybrid search using a synthetic loopback embedding endpoint. Inspected screenshots at 360, 768 and 1440 px in Obsidian and at 1440 px in light mode had no horizontal overflow. Scoped axe checks had zero automated violations. Real model compatibility and semantic accuracy remain unverified.
+
+## Phase 06 batch 1 — inbox sources and account-bound reads
+
+The commit titled `feat(inbox): unify persisted conversations and bound mail sync` reads WhatsApp threads, imported mentions and message notifications from existing stores. Phone authentication codes stay outside the inbox projection. A Gmail sync explicitly requests a bounded, reviewed read through one enabled account and deduplicates cached rows by account and message ID. Missing or ambiguous accounts cannot execute tools. Agent tool lookup ranks discovered schemas against the request and still uses the existing approval and account policy.
+
+Follow-up records link existing contacts, use revision checks, and bind a local read marker to the message the owner actually saw. Drafts reuse the pending approval queue. Retried drafts resolve to the same record and receipt labels distinguish a provider confirmation, owner confirmation, handoff and unknown outcome.
+
+Typecheck and 65 server tests passed, including synthetic Gmail and Composio coverage for account isolation, deduplication and revocation. A disposable Phase 05 backup migrated through 011 and passed restart, integrity, foreign-key and recovery checks. WhatsApp and Telegram notifications and Gmail provider shape remain untested with real accounts.
