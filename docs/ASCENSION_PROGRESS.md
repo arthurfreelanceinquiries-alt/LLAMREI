@@ -7,7 +7,8 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [ ] Phase 02 design tokens and accessible UI primitives.
 - [x] Phase 03 workspace redesign and local acceptance checks.
 - [x] Phase 04 Cognitive Core and local acceptance checks.
-- [ ] Phases 05–11 per master plan.
+- [x] Phase 05 Knowledge Vault and personal memory local acceptance.
+- [ ] Phases 06–11 per master plan.
 
 ## Phase 00
 
@@ -92,3 +93,15 @@ The Phase 04 branch started at `develop/llamrei-4` and fast-forwarded locally to
 Chromium served the production build from the actual API with synthetic SQLite data and a synthetic loopback model. It verified visible partial text, source references, keyboard cancellation, HTTP failure with draft retention, retry after a lost completion receipt, and approval and Undo for a local task. Obsidian screenshots at 360, 768 and 1440 px and light mode at 1440 px were inspected with no horizontal overflow or browser errors. Scoped axe checks found zero automated violations in the JARVIS drawer and latency panel. The fixture measured p50 at 173 ms and p95 at 184 ms from four streamed text samples. The delays came from the synthetic model server.
 
 The Phase 04 local acceptance gate passes. Real opt-in provider smoke tests remain open. Cloud inference is limited to verified zero-cost routes, and paid dispatch remains gated. Ollama requires an installed model on a loopback daemon exposing `/api/tags`. Real model latency and audio latency have not been measured.
+
+## Phase 05 batch 1 — Knowledge Vault storage and retrieval
+
+The commit titled `feat(memory): persist opt-in notes and local hybrid search` adds structured notes, explicit document snapshots with provenance, revision checks and expiration. SQLite FTS5 updates with each mutation. Removing a source document or expiring a note removes it from search and clears its vector. Local embeddings are opt-in and require an installed model on the loopback Ollama daemon. If the daemon or selected model is unavailable, search uses FTS5. The hybrid search merges lexical rank with cosine-similarity rank over up to 240 active indexed notes.
+
+The Phase 05 branch starts from the tested Phase 04 tree `524c42f`. Node 24.22.3 completed a frozen install, typecheck and 58 server tests. A disposable Phase 04 backup migrated through 010 once and preserved existing chat and task rows. SQLite integrity and foreign-key checks passed, and restart and restored backup both returned the saved note from FTS5. Synthetic Ollama responses covered hybrid recall, hosted alias denial, index opt-out and late-vector rejection after an edit. Real embedding accuracy and latency still need validation on a host with a local model.
+
+## Phase 05 batch 2 — vault workspace and JARVIS recall
+
+The commit titled `feat(memory): review and recall sourced notes in JARVIS` adds a Knowledge Vault workspace, previews and document provenance, tag and type filters, explicit recall consent, retention dates in WIB, and command-palette results. Selecting local memory in JARVIS keeps that turn on the local route and links cited notes to their vault entries. Recalled notes and eligible prior turns carry revision references. An edited, deleted, expired or withdrawn note is excluded from later model context. Existing replies stay visible in the user's conversation history.
+
+Typecheck, the production build and 61 tests passed. The vault loads on demand in a 4.72 kB gzipped JavaScript chunk. The main JavaScript chunk measured 137.92 kB gzipped. Server tests verified recall across sessions after restart, source provenance, exclusion from cloud requests, updated content, and revocation during a reply. Chromium exercised creation, edit, deletion confirmation, document import and source navigation, keyboard search, local recall, expiration and hybrid search using a synthetic loopback embedding endpoint. Inspected screenshots at 360, 768 and 1440 px in Obsidian and at 1440 px in light mode had no horizontal overflow. Scoped axe checks had zero automated violations. Real model compatibility and semantic accuracy remain unverified.

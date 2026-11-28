@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   CalendarDays,
   ChartNoAxesCombined,
   ClipboardList,
@@ -120,6 +121,7 @@ export function LeftClickUpSidebar({
         { id: 'morning', icon: LayoutDashboard, label: 'Ringkasan Pagi' },
         { id: 'clickup', icon: ClipboardList, label: 'Manajemen Tugas', count: openTaskCount, countLabel: 'tugas terbuka' },
         { id: 'calendar', icon: CalendarDays, label: 'Kalender & Alarm', count: armedAlarmCount, countLabel: 'alarm aktif' },
+        { id: 'knowledge', icon: BookOpen, label: 'Knowledge Vault' },
       ],
     },
     {

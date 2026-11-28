@@ -1,8 +1,9 @@
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import {
   ArrowDown,
   ArrowUp,
   Bell,
+  BookOpen,
   CalendarDays,
   FileText,
   CornerDownLeft,
@@ -14,8 +15,10 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
+import type { MemoryMatch } from '../../../shared/memory';
 import { alarmStatusLabels } from '../../lib/alarm-state';
 import { formatWibStamp } from '../../lib/calendar-time';
+import { findMemory, memoryKindLabels } from '../../lib/memory-client';
 import type { AlarmReminderItem, CalendarEventItem, ContactItem, NavTab, NewsArticleItem, TaskItem, WorkspaceDocItem } from '../../types/llamrei';
 
 interface Props {
@@ -32,6 +35,7 @@ interface Props {
   onSelectEvent: (id: string) => void;
   onSelectAlarm: (id: string) => void;
   onSelectDocument: (id: string) => void;
+  onSelectMemory: (id: string) => void;
   onAskLlamrei: (prompt: string, context?: Record<string, unknown>) => void;
 }
 
@@ -62,6 +66,7 @@ export function CommandPaletteModal({
   onSelectEvent,
   onSelectAlarm,
   onSelectDocument,
+  onSelectMemory,
   onAskLlamrei,
 }: Props) {
   const id = useId();
@@ -70,6 +75,7 @@ export function CommandPaletteModal({
   const resultsRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [memoryMatches, setMemoryMatches] = useState<{ query: string; items: MemoryMatch[] }>();
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -90,6 +96,16 @@ export function CommandPaletteModal({
   }, [open]);
 
   const prompt = query.trim();
+  useEffect(() => {
+    if (!open || prompt.length < 2) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void findMemory(prompt, { limit: 4, keywordOnly: true, signal: controller.signal }).then(({ items }) => {
+        if (!controller.signal.aborted) setMemoryMatches({ query: prompt, items });
+      }).catch(() => { if (!controller.signal.aborted) setMemoryMatches({ query: prompt, items: [] }); });
+    }, 150);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [open, prompt]);
   const terms = prompt.toLocaleLowerCase('id-ID').split(/\s+/).filter(Boolean);
   const matches = (...fields: Array<string | null | undefined>) => {
     const text = fields.filter(Boolean).join(' ').toLocaleLowerCase('id-ID');
@@ -137,6 +153,16 @@ export function CommandPaletteModal({
         detail: alarm.enabled ? alarmStatusLabels[alarm.status] : 'Nonaktif',
         select: () => onSelectAlarm(alarm.id),
       })),
+    },
+    {
+      title: 'Knowledge Vault',
+      icon: BookOpen,
+      items: memoryMatches?.query === prompt ? memoryMatches.items.map((item) => ({
+        key: item.id,
+        title: item.title,
+        detail: memoryKindLabels[item.kind],
+        select: () => onSelectMemory(item.id),
+      })) : [],
     },
     {
       title: 'Kontak',

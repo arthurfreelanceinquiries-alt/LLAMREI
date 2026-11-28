@@ -26,6 +26,7 @@ interface Props {
   onSendPrompt: (request: AgentRequest, controls: AgentRequestControls) => Promise<AgentReply>;
   onApproveAudit: (auditId: string) => Promise<void>;
   onUndoAudit: (auditId: string) => Promise<void>;
+  onOpenMemory: (id: string) => void;
   onOpenIntegrations: () => void;
   onClose: () => void;
 }
@@ -88,7 +89,7 @@ function stageLabel(stage: Extract<AgentProgress, { type: 'state' }>): string {
 export function RightLlamreiDrawer({
   messages, auditLogs, aiProviders, connectedAppsCount = 0, allowCloudContext,
   pendingContext, draft, onDraftLoaded, onClearContext, onSendPrompt, onApproveAudit, onUndoAudit,
-  onOpenIntegrations, onClose,
+  onOpenIntegrations, onOpenMemory, onClose,
 }: Props) {
   const [input, setInput] = useState(() => draft?.prompt ?? '');
   const [view, setView] = useState<'chat' | 'audit'>('chat');
@@ -98,6 +99,7 @@ export function RightLlamreiDrawer({
   const [voiceNote, setVoiceNote] = useState('');
   const [providerOverride, setProviderOverride] = useState<AiProviderId>();
   const [modelOverride, setModelOverride] = useState('');
+  const [useMemory, setUseMemory] = useState(false);
   const [pending, setPending] = useState<{ prompt: string; text: string; label: string }>();
   const [feedback, setFeedback] = useState<{ text: string; error?: boolean }>();
   const [retryPrompt, setRetryPrompt] = useState<{ prompt: string; requestId: string }>();
@@ -155,7 +157,7 @@ export function RightLlamreiDrawer({
     setPending({ prompt, text: '', label: 'Menyiapkan balasan…' });
     try {
       const result = await onSendPrompt({
-        prompt, requestId, contextAttachment: pendingContext, providerOverride: selectedProvider, modelOverride: selectedModel || undefined,
+        prompt, requestId, contextAttachment: pendingContext, providerOverride: selectedProvider, modelOverride: selectedModel || undefined, useMemory,
       }, {
         signal: request.signal,
         onProgress(progress) {
@@ -216,7 +218,7 @@ export function RightLlamreiDrawer({
           <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]"><Bot size={20} aria-hidden="true" /></span>
           <div className="min-w-0 flex-1">
             <h2 className="font-semibold">{assistantName}</h2>
-            <p className="text-xs text-[var(--text-secondary)]">{allowCloudContext ? 'Akses konteks cloud diizinkan' : 'Konteks lokal'}</p>
+            <p className="text-xs text-[var(--text-secondary)]">{useMemory ? 'Memori lokal' : allowCloudContext ? 'Akses konteks cloud diizinkan' : 'Konteks lokal'}</p>
           </div>
           <Control aria-label="Bacakan balasan" title="Bacakan balasan" aria-pressed={ttsEnabled} onClick={() => {
             if (ttsEnabled) window.speechSynthesis?.cancel();
@@ -292,8 +294,12 @@ export function RightLlamreiDrawer({
                     <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
                     {!!sources.length && (
                       <ul aria-label="Sumber balasan" className="flex flex-wrap gap-1 pt-1">
-                        {sources.map(({ id, label }) => (
-                          <li key={id} className="rounded-md bg-[var(--bg-elevated)] px-2 py-1 text-xs text-[var(--text-secondary)]">{id} · {label}</li>
+                        {sources.map(({ id, label, memoryId }) => (
+                          <li key={id} className="min-w-0 rounded-md bg-[var(--bg-elevated)] px-2 py-1 text-xs text-[var(--text-secondary)]">
+                            {typeof memoryId === 'string' && /^mem_[a-f\d-]{36}$/.test(memoryId)
+                              ? <button type="button" className="min-h-9 rounded text-left hover:underline" onClick={() => onOpenMemory(memoryId)}>{id} · {label}</button>
+                              : <>{id} · {label}</>}
+                          </li>
                         ))}
                       </ul>
                     )}
@@ -356,6 +362,9 @@ export function RightLlamreiDrawer({
           )}
           {voiceNote && <p className="ds-note" role="status">{voiceNote}</p>}
           {feedback && <p className="ds-note" role={feedback.error ? 'alert' : 'status'}>{feedback.text}</p>}
+          <label className="flex min-h-9 items-center gap-2 text-xs text-[var(--text-secondary)]">
+            <input type="checkbox" checked={useMemory} disabled={!!pending} onChange={(event) => setUseMemory(event.target.checked)} /> Gunakan memori lokal
+          </label>
           <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void submitPrompt(); }}>
             <textarea
               ref={composer}

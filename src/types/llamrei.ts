@@ -3,7 +3,7 @@ export type { AiProviderId } from '../../shared/ai-protocol';
 
 export type ThemeId = 'tactical' | 'hybrid' | 'obsidian' | 'bento' | 'light';
 
-export type NavTab = 'morning' | 'clickup' | 'calendar' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
+export type NavTab = 'morning' | 'clickup' | 'calendar' | 'knowledge' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
 
 export interface AiModelOption {
   id: string;

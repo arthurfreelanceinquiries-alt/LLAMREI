@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { CalendarAndAlarmView, type CalendarTarget } from './components/alarms/CalendarAndAlarmView';
 import { HardAlarmOverlayModal } from './components/alarms/HardAlarmOverlayModal';
 import { ClickUpWorkspaceView } from './components/clickup/ClickUpWorkspaceView';
@@ -19,6 +19,7 @@ import { IntegrationsHubView } from './components/integrations/IntegrationsHubVi
 import { FocusedChatModal } from './components/watags/FocusedChatModal';
 import { Control } from './components/ui/Control';
 import { DialogPanel } from './components/ui/DialogPanel';
+import { WorkspaceSection } from './components/ui/WorkspaceSection';
 import { isActiveAlarm } from './lib/alarm-state';
 import { listTaskStatuses } from './lib/task-status';
 import { apiRequest } from './lib/api-client';
@@ -32,10 +33,13 @@ import type {
   TaskItem,
 } from './types/llamrei';
 
+const MemoryVault = lazy(() => import('./components/memory/MemoryVault').then(({ MemoryVault }) => ({ default: MemoryVault })));
+
 function DashboardShell() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>('morning');
   const [calendarTarget, setCalendarTarget] = useState<(CalendarTarget & { request: number }) | null>(null);
+  const [memoryTarget, setMemoryTarget] = useState<{ id: string; request: number }>();
   const bootstrapRequest = useRef(0);
   const appliedBootstrap = useRef(0);
   const [selectedSpaceId, setSelectedSpaceId] = useState<string | 'ALL'>('ALL');
@@ -237,12 +241,19 @@ function DashboardShell() {
 
   const navigateTab = (tab: NavTab) => {
     setCalendarTarget(null);
+    setMemoryTarget(undefined);
     setActiveTab(tab);
   };
 
   const openCalendarTarget = (target: CalendarTarget) => {
     setCalendarTarget((current) => ({ ...target, request: (current?.request ?? 0) + 1 }));
     setActiveTab('calendar');
+  };
+
+  const openMemory = (id: string) => {
+    setMemoryTarget((previous) => ({ id, request: (previous?.request ?? 0) + 1 }));
+    setActiveTab('knowledge');
+    if (isCompact) setCopilotOpen(false);
   };
 
   const refreshAfterMutation = async () => {
@@ -283,6 +294,7 @@ function DashboardShell() {
         pendingContext={pendingContext}
         onClearContext={(expected) => setPendingContext((current) => expected && current !== expected ? current : null)}
         onSendPrompt={sendPromptToLlamrei}
+        onOpenMemory={openMemory}
         onOpenIntegrations={() => {
           setActiveTab('integrations');
           if (isCompact) setCopilotOpen(false);
@@ -529,6 +541,12 @@ function DashboardShell() {
                 return res;
               }}
             />
+          )}
+
+          {activeTab === 'knowledge' && (
+            <WorkspaceSection>
+              <MemoryVault key={memoryTarget?.request ?? 0} initialId={memoryTarget?.id} documents={data.workspaceDocs} onOpenDocument={setOpenDocumentId} />
+            </WorkspaceSection>
           )}
 
           {activeTab === 'phonehub' && (
@@ -916,6 +934,7 @@ function DashboardShell() {
         onSelectEvent={(id) => openCalendarTarget({ kind: 'event', id })}
         onSelectAlarm={(id) => openCalendarTarget({ kind: 'alarm', id })}
         onSelectDocument={setOpenDocumentId}
+        onSelectMemory={openMemory}
         onAskLlamrei={prepareCopilotDraft}
       />
 
