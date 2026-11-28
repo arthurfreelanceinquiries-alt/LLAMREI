@@ -210,7 +210,8 @@ export async function fetchLiveOllamaModels(
   signal?: AbortSignal,
 ): Promise<{ models: AiModelOption[]; online: boolean }> {
   const cleanUrl = baseUrl.replace(/\/+$/, '');
-  if (!isLoopbackModelEndpoint(cleanUrl)) return { models: [], online: false };
+  const endpoint = ollamaNativeEndpoint(cleanUrl, 'tags');
+  if (!endpoint) return { models: [], online: false };
   if (
     !forceRefresh &&
     fetchImpl === globalThis.fetch &&
@@ -222,9 +223,7 @@ export async function fetchLiveOllamaModels(
   }
   if (forceRefresh && fetchImpl === globalThis.fetch) cachedOllamaModels = null;
   try {
-    const tagsUrl = new URL(cleanUrl);
-    tagsUrl.pathname = `${tagsUrl.pathname.replace(/\/(?:v1)?$/, '')}/api/tags`;
-    const res = await fetchImpl(tagsUrl.href, { redirect: 'error', signal: timeoutSignal(1200, signal) });
+    const res = await fetchImpl(endpoint, { redirect: 'error', signal: timeoutSignal(1200, signal) });
     if (res.ok) {
       const json = (await res.json()) as {
         models?: Array<{ name?: string; model?: string; remote_host?: unknown; remote_model?: unknown }>;
@@ -508,6 +507,13 @@ function isLoopbackModelEndpoint(endpoint: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function ollamaNativeEndpoint(baseUrl: string, path: 'tags' | 'embed'): string | null {
+  if (!isLoopbackModelEndpoint(baseUrl)) return null;
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/$/, '').replace(/\/v1$/, '')}/api/${path}`;
+  return url.href;
 }
 
 function isOllamaCloudName(model: string): boolean {

@@ -9,6 +9,8 @@ import { getDb, initDatabase } from './db/connection.ts';
 import { createBrowserSessions } from './lib/browser-session.ts';
 import { HttpBadRequestError, readJsonBody, sendError, sendJson } from './lib/http.ts';
 import { sseBus } from './lib/sse.ts';
+import { routeMemory } from './memory/http.ts';
+import { purgeExpiredMemory } from './memory/store.ts';
 import {
   createOrUpdateHardAlarm,
   createStandaloneCalendarEvent,
@@ -179,6 +181,7 @@ function validScheduleRange(start: unknown, end?: unknown): boolean {
 
 async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
   const method = req.method ?? 'GET';
+  if (pathname === '/api/memory' || pathname.startsWith('/api/memory/')) return routeMemory(req, res, pathname);
 
   // Health & SSE
   if (method === 'GET' && pathname === '/api/health') {
@@ -1067,6 +1070,8 @@ const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === fileUR
 if (isEntrypoint) {
   initDatabase();
   startBackgroundDaemons();
+  purgeExpiredMemory();
+  setInterval(purgeExpiredMemory, 60 * 60_000).unref();
   autoConnectBaileysIfCredsExist();
   const port = Number(process.env.LLAMREI_PORT ?? 4321);
   // Bind strictly to loopback by default; Tailscale Serve proxies privately to 127.0.0.1
