@@ -8,6 +8,7 @@ export interface AgentRequest {
   contextAttachment: Record<string, unknown> | null;
   providerOverride: AiProviderId;
   modelOverride?: string;
+  useMemory?: boolean;
 }
 
 export interface AgentReply {

@@ -11,7 +11,7 @@ async function readAgentPrompt(req: IncomingMessage) {
   if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > MAX_AGENT_PROMPT_CHARS) {
     throw new HttpBadRequestError(400, `Masukkan pesan dengan panjang 1–${MAX_AGENT_PROMPT_CHARS} karakter.`);
   }
-  const { sessionId, requestId, contextAttachment, providerOverride, modelOverride } = body;
+  const { sessionId, requestId, contextAttachment, providerOverride, modelOverride, useMemory } = body;
   if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(sessionId))) {
     throw new HttpBadRequestError(400, 'Sesi asisten tidak valid.');
   }
@@ -30,10 +30,12 @@ async function readAgentPrompt(req: IncomingMessage) {
   if (modelOverride !== undefined && (typeof modelOverride !== 'string' || modelOverride.length > 256 || /[\u0000-\u001F\u007F]/.test(modelOverride))) {
     throw new HttpBadRequestError(400, 'Nama model tidak valid.');
   }
+  if (useMemory !== undefined && typeof useMemory !== 'boolean') throw new HttpBadRequestError(400, 'Pilihan memori tidak valid.');
   return {
     prompt: body.prompt.trim(),
     sessionId,
     requestId,
+    useMemory,
     contextAttachment: contextAttachment as Record<string, unknown> | null | undefined,
     aiOptions: { providerOverride: providerOverride as AiProviderId | undefined, modelOverride: modelOverride?.trim() || undefined },
   };
@@ -79,7 +81,7 @@ export async function respondToAgentPrompt(req: IncomingMessage, res: ServerResp
       if (!controller.signal.aborted) write({ type: 'complete', result });
     } catch (error) {
       if (!controller.signal.aborted) {
-        const message = error instanceof Error && error.name === 'TimeoutError'
+        const message = error instanceof HttpBadRequestError ? error.message : error instanceof Error && error.name === 'TimeoutError'
           ? 'Waktu respons habis. Pesan masih tersedia untuk dikirim ulang.'
           : 'Balasan terhenti. Periksa percakapan sebelum mengirim ulang.';
         write({ type: 'error', message });

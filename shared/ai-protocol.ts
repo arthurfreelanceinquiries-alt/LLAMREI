@@ -34,6 +34,7 @@ export const MAX_AGENT_PROMPT_CHARS = 8_000;
 export interface AgentSource {
   id: string;
   label: string;
+  memoryId?: string;
 }
 
 export type AgentProgress =
