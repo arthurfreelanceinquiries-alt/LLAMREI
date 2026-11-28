@@ -6,7 +6,8 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [ ] Phase 01 centralized authority, privacy and execution reliability.
 - [ ] Phase 02 design tokens and accessible UI primitives.
 - [x] Phase 03 workspace redesign and local acceptance checks.
-- [ ] Phases 04–11 per master plan.
+- [ ] Phase 04 Cognitive Core.
+- [ ] Phases 05–11 per master plan.
 
 ## Phase 00
 
@@ -65,3 +66,11 @@ Chromium with a loopback API and synthetic in-memory SQLite verified task, subta
 Screenshots were captured in Obsidian at 360, 768 and 1440 px and in the light theme at 1440 px. The inspected layouts had no horizontal document overflow or browser errors. Scoped axe checks found zero automated violations in the calendar and command palette. Calendar contrast follow-up remains for nodes axe flagged for manual review. On this cloud host using Vite and synthetic data, cold overview loads took 423–597 ms, opening and filling the palette took 57–70 ms, and calendar navigation took 81–84 ms on desktop and 173–174 ms through the compact drawer. Performance on target hardware remains unverified.
 
 The Phase 03 local acceptance gate passes. Real Android exact alarms, NectarLink delivery, live Notion sync and real cloud account execution remain unverified. Phase 04 covers provider routing, streaming, cost and context validation before live opt-in smoke checks.
+
+## Phase 04 batch 1 — model routing and measurements
+
+The commit titled `feat(ai): route verified models with streaming and latency metrics` separates OpenAI-compatible transport from eligibility, routing and measurement. OpenCode and OpenRouter require a current exact zero-price listing and skip routes reporting a charge. OpenRouter keeps zero routing ceilings. Ollama connects only to loopback and uses the native `/api/tags` list to verify the installed selection and exclude hosted aliases. Known tool and context limits influence fallback. A transient rate limit opens the circuit, two failures within a minute trigger a cooldown, and one probe can attempt recovery. Transport errors use fixed descriptions.
+
+The adapter reads SSE deltas and assembles complete tool arguments. Incomplete responses and invalid argument objects are rejected. Authenticated `GET /api/ai/metrics` groups up to 2,048 local attempt samples over seven days and reports p50 and p95 time to first streamed text by provider and model with sample counts. Cancelled, failed, buffered JSON and tool-only responses do not contribute to text latency percentiles. The metric records provider dispatch to the first non-whitespace text delta. Dispatch samples contain timing and route metadata. Audio measurements belong in Phase 08.
+
+Node 24.22.3 completed a clean lockfile install, typecheck and 49 server tests. Mock coverage includes UTF-8 split frames, fragmented calls, truncation, cancellation, capability fallback, circuit cooldown and reopening, hosted alias denial and zero-cost billing checks. A synthetic Phase 03 backup migrated to 008 once and preserved task rows and a legacy usage entry. Restart and restore retained timing samples and passed SQLite integrity and foreign-key checks. Live model compatibility and priced billing remain open. Streaming through the conversation and browser is tracked in the next batch.

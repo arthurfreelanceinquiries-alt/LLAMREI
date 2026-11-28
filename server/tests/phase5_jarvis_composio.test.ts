@@ -99,6 +99,7 @@ test('Multi-Provider AI auto-fallback switches from rate-limited OpenCode Zen to
       if (url.includes('opencode.ai')) {
         return new Response('Rate limited', { status: 429 });
       }
+      if (url === 'http://127.0.0.1:11434/api/tags') return Response.json({ models: [{ model: 'qwen2.5:7b' }] });
       if (url.startsWith('http://127.0.0.1:11434/')) {
         return new Response(
           JSON.stringify({
@@ -230,6 +231,10 @@ test('Private prompts, stored history, attachments and tool observations stay lo
     ).run('Sensitive prior note. Email private@example.test');
     let calls = 0;
     const fetchImpl: typeof fetch = async (url, init) => {
+      if (String(url) === 'http://127.0.0.1:11434/api/tags') {
+        assert.equal(init?.body, undefined);
+        return Response.json({ models: [{ model: 'qwen2.5:7b' }] });
+      }
       calls++;
       assert.equal(String(url), 'http://127.0.0.1:11434/v1/chat/completions');
       assert.equal(init?.redirect, 'error');

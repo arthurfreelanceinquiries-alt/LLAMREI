@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getModelLatency } from './ai/provider-metrics.ts';
 import { getDb, initDatabase } from './db/connection.ts';
 import { createBrowserSessions } from './lib/browser-session.ts';
 import { HttpBadRequestError, readJsonBody, sendError, sendJson } from './lib/http.ts';
@@ -580,6 +581,10 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     const urlObj = new URL(req.url ?? '/', 'http://127.0.0.1');
     const refresh = urlObj.searchParams.get('refresh') === '1';
     sendJson(res, 200, await getAiProvidersCatalog(refresh));
+    return true;
+  }
+  if (method === 'GET' && pathname === '/api/ai/metrics') {
+    sendJson(res, 200, { models: getModelLatency() });
     return true;
   }
   if (method === 'POST' && pathname === '/api/ai/providers/refresh') {

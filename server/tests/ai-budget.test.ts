@@ -147,6 +147,7 @@ test('verified billing consent cannot enable unknown prices and loopback Ollama 
   const fetchImpl: typeof fetch = async (input, init) => {
     requests.push(String(input));
     assert.equal(init?.redirect, 'error');
+    if (String(input).endsWith('/api/tags')) return Response.json({ models: [{ model: 'qwen2.5:7b' }] });
     return completion();
   };
   for (const providerOverride of ['groq', 'gemini', 'opencode_cli'] as const) {
@@ -159,6 +160,6 @@ test('verified billing consent cannot enable unknown prices and loopback Ollama 
   setting('ollama_base_url', 'http://127.0.0.1:11434/v1');
   const local = await invokeAiWithFallback(messages, [], { providerOverride: 'ollama', fetchImpl });
   assert.equal(local?.isFreeTier, true);
-  assert.deepEqual(requests, ['http://127.0.0.1:11434/v1/chat/completions']);
+  assert.deepEqual(requests, ['http://127.0.0.1:11434/api/tags', 'http://127.0.0.1:11434/v1/chat/completions']);
   assert.equal(getAiBudgetSummary().monthlySpentUsd, 0);
 });
