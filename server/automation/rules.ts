@@ -10,6 +10,8 @@ interface RuleRow {
   enabled: number;
 }
 
+export const automationRequestIdPattern = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i;
+
 export function inputRecord(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new HttpBadRequestError(400, 'Permintaan otomasi tidak valid.');
   return input as Record<string, unknown>;
@@ -108,14 +110,25 @@ export function saveAutomationRule(raw: unknown, id?: string): AutomationRule {
   const triggerList = definition.trigger.kind === 'task_completed' ? definition.trigger.listId : null;
   const active = Number(Boolean(triggerList && enabled));
   const db = getDb();
-  const draftId = id ?? crypto.randomUUID();
+  const requestId = input.requestId;
+  if (!id && requestId !== undefined && (typeof requestId !== 'string' || !automationRequestIdPattern.test(requestId))) {
+    throw new HttpBadRequestError(400, 'Identitas permintaan aturan tidak valid.');
+  }
+  const draftId = id ?? (typeof requestId === 'string' ? requestId : crypto.randomUUID());
+  const plan = JSON.stringify(definition);
   if (current) {
     const result = db.prepare(`UPDATE automation_rules SET revision = revision + 1, definition_json = ?, trigger_list_id = ?, enabled = ?
-      WHERE id = ? AND revision = ?`).run(JSON.stringify(definition), triggerList, active, draftId, current.revision);
+      WHERE id = ? AND revision = ?`).run(plan, triggerList, active, draftId, current.revision);
     if (!result.changes) throw new HttpBadRequestError(409, 'Aturan sudah berubah. Muat ulang sebelum menyimpan.');
   } else {
-    db.prepare('INSERT INTO automation_rules (id, revision, definition_json, trigger_list_id, enabled) VALUES (?, 1, ?, ?, ?)')
-      .run(draftId, JSON.stringify(definition), triggerList, active);
+    const created = db.prepare(`INSERT INTO automation_rules (id, revision, definition_json, trigger_list_id, enabled)
+      VALUES (?, 1, ?, ?, ?) ON CONFLICT (id) DO NOTHING`).run(draftId, plan, triggerList, active);
+    if (!created.changes) {
+      const prior = db.prepare('SELECT * FROM automation_rules WHERE id = ?').get(draftId) as unknown as RuleRow;
+      if (prior.revision !== 1 || prior.definition_json !== plan || prior.enabled !== active) {
+        throw new HttpBadRequestError(409, 'Permintaan aturan sudah digunakan.');
+      }
+    }
   }
   sseBus.emit('automation:update', {});
   return getAutomationRule(draftId);

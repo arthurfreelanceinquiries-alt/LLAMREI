@@ -9,7 +9,7 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [x] Phase 04 Cognitive Core and local acceptance checks.
 - [x] Phase 05 Knowledge Vault and personal memory local acceptance.
 - [x] Phase 06 Unified Inbox and Composio local acceptance.
-- [ ] Phase 07 Sentinel, Mission Control and Automation Studio.
+- [x] Phase 07 Sentinel, Mission Control and Automation Studio local acceptance.
 - [ ] Phases 08–11 per master plan.
 
 ## Phase 00
@@ -129,3 +129,11 @@ The source gallery and Gmail endpoint were tested with fixture archives and synt
 The commit titled `feat(automation): persist local events and mission checkpoints` adds a SQLite outbox for tasks that transition to Done in a selected list. Rules are off until enabled. The worker claims bounded batches and ignores queued events for outdated rule revisions. Missions launched manually have a replay key. Each mission keeps its exact plan, deadline and checkpoints. The local task step requires one expiring approval for that step and destination. Its task record and checkpoint commit together. The other supported step records a note in the mission. All operations have a fixed USD 0 budget. Quiet hours use WIB, including windows that cross midnight.
 
 Typecheck and 70 server tests passed. New tests covered preview without writes, restart before and after approval, approval binding and expiration, source transaction rollback, stale rule events, cancellation, quiet hours and bounded retries with task rollback. A disposable Phase 06 backup migrated once through 012, preserved an existing task and restored a queued mission that completed after restart. SQLite integrity and foreign-key checks passed. Visual rule editing and mission review are next.
+
+## Phase 07 batch 2 — Mission Control and visual rules
+
+The commit titled `feat(automation): add visual rules and mission review` adds a visual editor for the trigger, list condition, ordered steps and quiet hours. Dry run shows the exact steps, approval requirement, earliest start, deadline and fixed local budget. Mission Control shows live progress and checkpoints, the exact task and destination at approval, cancellation, and links to workspace tasks. Sentinel lists recent event outcomes and matched missions. Request keys also cover retries while saving new rules.
+
+Typecheck, the production build and all 70 server tests passed. The lazy workspace chunk measured 4.97 kB gzipped. Chromium with outbound access disabled exercised step reordering, dry run without writes, a lost save response followed by a deduplicated retry, exact step approval, Sentinel's task event, and cancellation with zero scheduled messages. Sidebar navigation and detail focus were exercised with the keyboard. Inspected Obsidian screenshots at 360, 768 and 1440 px and light screenshots at 1440 px had no horizontal overflow. Scoped axe checks reported zero automated violations and marked the rule dialog's contrast for manual review.
+
+The worker executes a closed set of local actions. External automation and live connector messaging were outside development validation. Phase 08 starts with explicit local media controls.

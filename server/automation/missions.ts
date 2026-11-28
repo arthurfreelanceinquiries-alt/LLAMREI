@@ -3,7 +3,7 @@ import { getDb } from '../db/connection.ts';
 import { HttpBadRequestError } from '../lib/http.ts';
 import { sseBus } from '../lib/sse.ts';
 import { createTask } from '../services/workspace.service.ts';
-import { getAutomationRule, inputRecord, listAutomationRules, workspaceListExists } from './rules.ts';
+import { automationRequestIdPattern, getAutomationRule, inputRecord, listAutomationRules, workspaceListExists } from './rules.ts';
 
 interface MissionRow {
   id: string;
@@ -46,7 +46,6 @@ interface CheckpointRow {
 const batchSize = 12;
 const maxAttempts = 3;
 const approvalTimeout = 15 * 60_000;
-const uuid = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i;
 
 function inTransaction<T>(operation: () => T): T {
   const db = getDb();
@@ -122,7 +121,7 @@ function insertMission(rule: AutomationRule, source: MissionSource, createdAt: D
 
 export function runSavedRule(ruleId: string, raw: unknown, now = new Date()): MissionDetail {
   const { revision, requestId } = inputRecord(raw);
-  if (typeof requestId !== 'string' || !uuid.test(requestId)) throw new HttpBadRequestError(400, 'Identitas permintaan misi tidak valid.');
+  if (typeof requestId !== 'string' || !automationRequestIdPattern.test(requestId)) throw new HttpBadRequestError(400, 'Identitas permintaan misi tidak valid.');
   const missionId = inTransaction(() => {
     const prior = getDb().prepare('SELECT id, rule_id, rule_revision FROM automation_missions WHERE request_id = ?').get(requestId) as
       { id: string; rule_id: string; rule_revision: number } | undefined;
@@ -140,7 +139,7 @@ export function runSavedRule(ruleId: string, raw: unknown, now = new Date()): Mi
 
 export function approveMissionStep(id: string, raw: unknown, now = new Date()): MissionDetail {
   const { stepIndex, approvalId } = inputRecord(raw);
-  if (typeof stepIndex !== 'number' || !Number.isInteger(stepIndex) || typeof approvalId !== 'string' || !uuid.test(approvalId)) {
+  if (typeof stepIndex !== 'number' || !Number.isInteger(stepIndex) || typeof approvalId !== 'string' || !automationRequestIdPattern.test(approvalId)) {
     throw new HttpBadRequestError(400, 'Identitas persetujuan tidak valid.');
   }
   inTransaction(() => {
@@ -273,9 +272,9 @@ export function processAutomationTick(now = new Date()): boolean {
     } catch {
       const exhausted = mission.attempts + 1 >= maxAttempts;
       const result = db.prepare(`UPDATE automation_missions SET attempts = attempts + 1, status = ?, run_at = ?, reason = ?
-        WHERE id = ? AND status = 'queued' AND step_index = ? AND attempts = ?`).run(
+        WHERE id = ? AND status = 'queued' AND step_index = ? AND attempts = ? AND run_at = ?`).run(
         exhausted ? 'failed' : 'queued', retryTime(mission.attempts, now),
-        exhausted ? 'Langkah gagal setelah beberapa percobaan.' : 'Menunggu percobaan ulang.', mission.id, mission.step_index, mission.attempts,
+        exhausted ? 'Langkah gagal setelah beberapa percobaan.' : 'Menunggu percobaan ulang.', mission.id, mission.step_index, mission.attempts, mission.run_at,
       );
       if (result.changes) changed = true;
     }

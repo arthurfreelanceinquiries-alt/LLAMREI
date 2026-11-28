@@ -5,6 +5,7 @@ import {
   ClipboardList,
   Clock3,
   Folder,
+  GitBranch,
   Inbox,
   Layers3,
   LayoutDashboard,
@@ -123,6 +124,7 @@ export function LeftClickUpSidebar({
         { id: 'clickup', icon: ClipboardList, label: 'Manajemen Tugas', count: openTaskCount, countLabel: 'tugas terbuka' },
         { id: 'calendar', icon: CalendarDays, label: 'Kalender & Alarm', count: armedAlarmCount, countLabel: 'alarm aktif' },
         { id: 'knowledge', icon: BookOpen, label: 'Knowledge Vault' },
+        { id: 'automation', icon: GitBranch, label: 'Misi & Otomasi' },
       ],
     },
     {

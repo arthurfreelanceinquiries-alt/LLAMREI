@@ -48,6 +48,11 @@ test('dry runs validate bounded local steps, show quiet hours and never create e
   }
   assert.deepEqual(getAutomationSnapshot(), { rules: [], missions: [], events: [] });
   assert.equal(count('scheduled_messages'), before);
+  const request = { ...definition, requestId: crypto.randomUUID() };
+  const original = saveAutomationRule(request);
+  assert.deepEqual(saveAutomationRule(request), original);
+  assert.throws(() => saveAutomationRule({ ...request, name: 'Versi lain' }), { status: 409 });
+  assert.equal(getAutomationSnapshot().rules.length, 1);
 });
 
 test('a frozen mission resumes through restart and exact approval, executing its local task once', (t) => {
