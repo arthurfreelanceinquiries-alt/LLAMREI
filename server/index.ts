@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { respondToAgentPrompt } from './ai/agent-http.ts';
 import { getModelLatency } from './ai/provider-metrics.ts';
 import { getDb, initDatabase } from './db/connection.ts';
+import { routeAutomation } from './automation/http.ts';
+import { startAutomationWorker } from './automation/missions.ts';
 import { routeInbox } from './inbox/http.ts';
 import { createBrowserSessions } from './lib/browser-session.ts';
 import { HttpBadRequestError, readJsonBody, sendError, sendJson } from './lib/http.ts';
@@ -183,6 +185,7 @@ function validScheduleRange(start: unknown, end?: unknown): boolean {
 async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
   const method = req.method ?? 'GET';
   if (pathname === '/api/inbox' || pathname.startsWith('/api/inbox/')) return routeInbox(req, res, pathname);
+  if (pathname === '/api/automation' || pathname.startsWith('/api/automation/')) return routeAutomation(req, res, pathname);
   if (pathname === '/api/memory' || pathname.startsWith('/api/memory/')) return routeMemory(req, res, pathname);
 
   // Health & SSE
@@ -1072,6 +1075,7 @@ const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === fileUR
 if (isEntrypoint) {
   initDatabase();
   startBackgroundDaemons();
+  startAutomationWorker();
   purgeExpiredMemory();
   setInterval(purgeExpiredMemory, 60 * 60_000).unref();
   autoConnectBaileysIfCredsExist();

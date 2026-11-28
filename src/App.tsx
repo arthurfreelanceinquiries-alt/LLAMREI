@@ -35,6 +35,7 @@ import type {
 
 const MemoryVault = lazy(() => import('./components/memory/MemoryVault').then(({ MemoryVault }) => ({ default: MemoryVault })));
 const InboxView = lazy(() => import('./components/inbox/InboxView').then(({ InboxView }) => ({ default: InboxView })));
+const AutomationCenter = lazy(() => import('./components/automation/AutomationCenter').then(({ AutomationCenter }) => ({ default: AutomationCenter })));
 
 function DashboardShell() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
@@ -60,6 +61,7 @@ function DashboardShell() {
   const [bootstrapError, setBootstrapError] = useState(false);
   const [liveUpdates, setLiveUpdates] = useState(true);
   const [inboxVersion, setInboxVersion] = useState(0);
+  const [automationVersion, setAutomationVersion] = useState(0);
 
   useEffect(() => {
     const query = window.matchMedia('(min-width: 1024px)');
@@ -117,6 +119,7 @@ function DashboardShell() {
     const es = new EventSource('/api/events');
     const refresh = () => void loadBootstrap().catch(() => undefined);
     const refreshInbox = () => setInboxVersion((current) => current + 1);
+    const refreshAutomation = () => setAutomationVersion((current) => current + 1);
     let disconnected = false;
     es.addEventListener('error', () => {
       disconnected = true;
@@ -124,12 +127,13 @@ function DashboardShell() {
     });
     es.addEventListener('open', () => {
       setLiveUpdates(true);
-      if (disconnected) { refresh(); refreshInbox(); }
+      if (disconnected) { refresh(); refreshInbox(); refreshAutomation(); }
       disconnected = false;
     });
     for (const event of ['wa:message', 'wa:imported', 'wa:status', 'wa:tag_mention', 'phone:notification', 'phone:notification_updated', 'phone:notification_dismissed', 'chat:update', 'chat:dispatched', 'composio:update']) {
       es.addEventListener(event, refreshInbox);
     }
+    es.addEventListener('automation:update', refreshAutomation);
 
     es.addEventListener('alarm:ring', (ev) => {
       const alarm = JSON.parse((ev as MessageEvent).data) as AlarmReminderItem;
@@ -688,6 +692,12 @@ function DashboardShell() {
                 navigateTab('scheduler');
                 void loadBootstrap().catch(() => undefined);
               }} />
+            </WorkspaceSection>
+          )}
+
+          {activeTab === 'automation' && (
+            <WorkspaceSection>
+              <AutomationCenter lists={data.workspace.lists} version={automationVersion} onOpenTask={setOpenTaskId} taskIds={new Set(data.workspace.tasks.map(({ id }) => id))} />
             </WorkspaceSection>
           )}
 
