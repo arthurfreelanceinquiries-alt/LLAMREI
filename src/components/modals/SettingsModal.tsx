@@ -6,6 +6,7 @@ import { THEME_META, useTheme } from '../../theme/ThemeContext';
 import type { AiProviderCatalogSummary, AiProviderId, BootstrapPayload, ThemeId } from '../../types/llamrei';
 import { Control } from '../ui/Control';
 import { DialogPanel } from '../ui/DialogPanel';
+import { ModelLatencyPanel } from './ModelLatencyPanel';
 
 interface Props {
   open: boolean;
@@ -182,6 +183,7 @@ export function SettingsModal({
                 <p className="text-sm text-[var(--text-secondary)]">Eksekusi cloud memerlukan biaya nol yang terverifikasi.</p>
                 {onRefreshProviders && <Control className="ds-control--outline" onClick={() => void refreshModels()}><RefreshCw aria-hidden="true" /> {action.pending === 'catalog' ? 'Memeriksa…' : 'Periksa katalog'}</Control>}
               </div>
+              <ModelLatencyPanel />
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="ds-label">Identitas asisten
                   <select className="ds-field" value={draft.assistant_persona} onChange={(event) => update('assistant_persona', event.target.value)}>
@@ -204,7 +206,7 @@ export function SettingsModal({
                     </label>
                   );
                 })}
-                <label className="ds-label">Alamat Ollama<input className="ds-field" type="url" value={draft.ollama_base_url} onChange={(event) => update('ollama_base_url', event.target.value)} /></label>
+                <label className="ds-label">Alamat Ollama<input className="ds-field" type="url" value={draft.ollama_base_url} onChange={(event) => update('ollama_base_url', event.target.value)} /><span className="text-xs text-[var(--text-secondary)]">Gunakan alamat loopback dan model yang terpasang secara lokal.</span></label>
                 <label className="ds-label">Anggaran AI bulanan (USD)<input className="ds-field" type="number" min="0" step="0.01" value={draft.ai_monthly_budget_usd} onChange={(event) => update('ai_monthly_budget_usd', event.target.value)} /></label>
               </div>
               <label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={draft.allow_opencode_cli_fallback} onChange={(event) => update('allow_opencode_cli_fallback', event.target.checked)} /> Izinkan cadangan OpenCode CLI setelah harga terverifikasi</label>

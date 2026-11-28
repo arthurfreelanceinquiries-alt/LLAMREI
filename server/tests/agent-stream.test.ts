@@ -97,10 +97,11 @@ test('HTTP sends provisional text and observed sources, then stores the complete
     }), { headers: sseHeaders });
   });
 
-  const response = await post(base, {
-    prompt: expectedPrompt, providerOverride: 'ollama',
+  const request = {
+    prompt: expectedPrompt, providerOverride: 'ollama', requestId: crypto.randomUUID(),
     contextAttachment: { title: 'Synthetic contact private@example.test', api_key: 'fixture-attachment-secret' },
-  });
+  };
+  const response = await post(base, request);
   let sawRead = false;
   let result: PromptResult | undefined;
   for await (const event of frames(response)) {
@@ -117,6 +118,10 @@ test('HTTP sends provisional text and observed sources, then stores the complete
     { id: 'S1', label: 'Item terlampir' }, { id: 'S2', label: 'Tugas workspace' },
   ]);
   assert.equal(getDb().prepare('SELECT count(*) AS n FROM chat_messages WHERE content = ?').get(expectedPrompt)?.n, 1);
+  let replayId: string | undefined;
+  for await (const event of frames(await post(base, request))) if (event.type === 'complete') replayId = event.result.assistantMessage.id;
+  assert.equal(replayId, result?.assistantMessage.id);
+  assert.equal(calls, 2);
 
   const metrics = await (await realFetch(`${base}/api/ai/metrics`)).json() as { models: Array<{ streamedSamples: number }> };
   assert.equal(metrics.models[0].streamedSamples, 2);
@@ -125,6 +130,20 @@ test('HTTP sends provisional text and observed sources, then stores the complete
   const legacyBody = await legacy.json() as PromptResult;
   assert.equal(legacyBody.providerUsed, 'local');
   assert.match(legacyBody.assistantMessage.content, /MORNING BRIEFING/);
+});
+
+test('concurrent retries of the same request leave one approval and reuse the recorded response', { timeout: 6000 }, async (t) => {
+  const base = await setup(t, async () => assert.fail('Unexpected outgoing fixture request'));
+  const request = { prompt: 'Buat tugas Fixture Ascension', requestId: crypto.randomUUID(), providerOverride: 'local' };
+  const replies = await Promise.all([post(base, request, { legacy: true }), post(base, request, { legacy: true })]);
+  const [first, second] = await Promise.all(replies.map(async (reply) => {
+    assert.equal(reply.status, 200);
+    return await reply.json() as PromptResult;
+  }));
+  assert.equal(first.userMessage.id, second.userMessage.id);
+  assert.equal(first.assistantMessage.id, second.assistantMessage.id);
+  assert.ok(first.assistantMessage.approval_card_json);
+  assert.equal(getDb().prepare('SELECT count(*) AS n FROM agent_audit_logs WHERE user_command = ?').get(request.prompt)?.n, 1);
 });
 
 test('disconnect cancels upstream and leaves the prompt, partial reply and proposals uncommitted', { timeout: 6000 }, async (t) => {

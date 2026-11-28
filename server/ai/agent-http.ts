@@ -11,12 +11,15 @@ async function readAgentPrompt(req: IncomingMessage) {
   if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > MAX_AGENT_PROMPT_CHARS) {
     throw new HttpBadRequestError(400, `Masukkan pesan dengan panjang 1–${MAX_AGENT_PROMPT_CHARS} karakter.`);
   }
-  const { sessionId, contextAttachment, providerOverride, modelOverride } = body;
+  const { sessionId, requestId, contextAttachment, providerOverride, modelOverride } = body;
   if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(sessionId))) {
     throw new HttpBadRequestError(400, 'Sesi asisten tidak valid.');
   }
   if (!getDb().prepare('SELECT 1 FROM chat_sessions WHERE id = ?').get(sessionId ?? 'sess_main')) {
     throw new HttpBadRequestError(404, 'Sesi asisten tidak ditemukan.');
+  }
+  if (requestId !== undefined && (typeof requestId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId))) {
+    throw new HttpBadRequestError(400, 'ID permintaan tidak valid.');
   }
   if (contextAttachment != null && (typeof contextAttachment !== 'object' || Array.isArray(contextAttachment))) {
     throw new HttpBadRequestError(400, 'Konteks terlampir harus berupa objek.');
@@ -30,6 +33,7 @@ async function readAgentPrompt(req: IncomingMessage) {
   return {
     prompt: body.prompt.trim(),
     sessionId,
+    requestId,
     contextAttachment: contextAttachment as Record<string, unknown> | null | undefined,
     aiOptions: { providerOverride: providerOverride as AiProviderId | undefined, modelOverride: modelOverride?.trim() || undefined },
   };

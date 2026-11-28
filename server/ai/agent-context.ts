@@ -20,10 +20,10 @@ export function redactAiText(text: string): string {
 
 export function compactAttachment(input?: Record<string, unknown> | null): Record<string, string> | null {
   if (!input) return null;
-  const values = Object.entries(input).flatMap(([key, value]): Array<[string, string]> =>
-    attachmentFields.includes(key) && typeof value === 'string'
-      ? [[key, redactAiText(value).slice(0, 1200)]] : [],
-  );
+  const values = attachmentFields.flatMap((key): Array<[string, string]> => {
+    const value = input[key];
+    return typeof value === 'string' ? [[key, redactAiText(value).slice(0, 1200)]] : [];
+  });
   return values.length ? Object.fromEntries(values) : null;
 }
 

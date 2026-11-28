@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AgentProgress, AgentSource, ProviderAttempt } from '../../shared/ai-protocol.ts';
 import { compactAttachment, compactToolResult, redactAiText, redactToolArguments } from '../ai/agent-context.ts';
 import { validateToolInput } from '../ai/tool-input.ts';
@@ -534,36 +535,57 @@ function buildApprovalCardForToolCall(params: {
     };
   }
 
-  const actionArgs = toolName === 'create_clickup_task'
-    ? { listId: getWorkspaceSnapshot().lists[0]?.id, priority: 'normal', ...args }
-    : args;
+  const title = typeof args.title === 'string' ? args.title.trim() : '';
+  if (!title || (toolName !== 'create_clickup_task' && toolName !== 'set_task_alarm_and_calendar')) {
+    return { card: null, replyFallback: 'Rincian aksi perlu dilengkapi sebelum dimintakan persetujuan.' };
+  }
+  const workspace = getWorkspaceSnapshot();
+  const actionArgs = { ...args, title };
+  let actionTitle: string;
+  let summary: string;
+  if (toolName === 'create_clickup_task') {
+    const list = args.listId ? workspace.lists.find(({ id }) => id === args.listId) : workspace.lists[0];
+    if (!list) return { card: null, replyFallback: 'Pilih daftar tugas yang tersedia.' };
+    const priority = args.priority ?? 'normal';
+    Object.assign(actionArgs, { listId: list.id, priority });
+    actionTitle = `Buat tugas ${title}`;
+    summary = `${list.name} · Prioritas ${priority} · ${args.dueAtIso ? `Tenggat ${args.dueAtIso}` : 'Tanpa tenggat'}`;
+  } else {
+    actionTitle = `Pasang alarm ${title}`;
+    const task = workspace.tasks.find(({ id }) => id === args.taskId);
+    if (args.taskId && !task) return { card: null, replyFallback: 'Tugas tertaut sudah tidak tersedia.' };
+    summary = `${args.triggerAtIso}${task ? ` · Tugas ${task.title}` : ' · Agenda mandiri'}`;
+  }
   const card = createPendingApprovalAudit({
     sessionId,
     userCommand: userPrompt,
     toolName,
-    title: `Aksi Co-Commander: ${toolName}`,
-    summary: JSON.stringify(actionArgs),
+    title: actionTitle,
+    summary,
     args: actionArgs,
   });
   return {
     card,
-    replyFallback: `Silakan setujui aksi **${toolName}** pada kartu konfirmasi di bawah.`,
+    replyFallback: 'Tinjau rincian aksi di kartu persetujuan sebelum menjalankannya.',
   };
 }
 
-export async function handleLlamreiPrompt(input: {
-  prompt: string;
-  sessionId?: string;
-  contextAttachment?: Record<string, unknown> | null;
-  aiOptions?: AiInvocationOptions;
-  onProgress?: (progress: AgentProgress) => void;
-}): Promise<{
+interface PromptResult {
   userMessage: ChatMessageRow;
   assistantMessage: ChatMessageRow;
   usedGemini: boolean;
   providerUsed: string;
   attempts: ProviderAttempt[];
-}> {
+}
+
+export async function handleLlamreiPrompt(input: {
+  prompt: string;
+  sessionId?: string;
+  requestId?: string;
+  contextAttachment?: Record<string, unknown> | null;
+  aiOptions?: AiInvocationOptions;
+  onProgress?: (progress: AgentProgress) => void;
+}): Promise<PromptResult> {
   const db = getDb();
   const sessionId = input.sessionId ?? 'sess_main';
   const caller = input.aiOptions?.signal;
@@ -572,6 +594,22 @@ export async function handleLlamreiPrompt(input: {
   signal.throwIfAborted();
 
   const attachment = compactAttachment(input.contextAttachment);
+  const turnId = input.requestId ? createHash('sha256').update(JSON.stringify([
+    sessionId, input.requestId, input.prompt, attachment, input.aiOptions?.providerOverride, input.aiOptions?.modelOverride,
+  ])).digest('hex') : crypto.randomUUID();
+  const userId = `cmsg_${turnId}`;
+  const assistantId = `cmsg_reply_${turnId}`;
+  const findMessage = db.prepare('SELECT * FROM chat_messages WHERE id = ? AND session_id = ?');
+  function completedTurn(): PromptResult | undefined {
+    if (!input.requestId) return;
+    const userMessage = findMessage.get(userId, sessionId) as unknown as ChatMessageRow | undefined;
+    const assistantMessage = findMessage.get(assistantId, sessionId) as unknown as ChatMessageRow | undefined;
+    if (!userMessage || !assistantMessage) return;
+    const providerUsed = assistantMessage.model_used?.includes('/') ? assistantMessage.model_used.split('/')[0] : 'local';
+    return { userMessage, assistantMessage, usedGemini: providerUsed === 'gemini', providerUsed, attempts: [] };
+  }
+  const prior = completedTurn();
+  if (prior) return prior;
   const settings = getAiSettingsSnapshot();
   const selected = input.aiOptions?.providerOverride ?? settings.provider;
   const mayUseCloud = () => getAiSettingsSnapshot().allowCloudChatContext;
@@ -690,10 +728,14 @@ export async function handleLlamreiPrompt(input: {
     usedGemini = false;
   }
 
-  const userId = `cmsg_${crypto.randomUUID()}`;
-  const assistantId = `cmsg_${crypto.randomUUID()}`;
+  const concurrent = completedTurn();
+  if (concurrent) return concurrent;
   db.exec('SAVEPOINT agent_turn');
   try {
+    db.prepare(`
+      INSERT INTO chat_messages (id, session_id, role, content, context_attachment_json)
+      VALUES (?, ?, 'user', ?, ?)
+    `).run(userId, sessionId, input.prompt, attachment ? JSON.stringify(attachment) : null);
     let card: ApprovalCardData | null = null;
     if (proposal) {
       const { tool, args } = proposal;
@@ -713,10 +755,6 @@ export async function handleLlamreiPrompt(input: {
     }
 
     db.prepare(`
-      INSERT INTO chat_messages (id, session_id, role, content, context_attachment_json)
-      VALUES (?, ?, 'user', ?, ?)
-    `).run(userId, sessionId, input.prompt, attachment ? JSON.stringify(attachment) : null);
-    db.prepare(`
       INSERT INTO chat_messages (id, session_id, role, content, approval_card_json, model_used, source_refs_json)
       VALUES (?, ?, 'assistant', ?, ?, ?, ?)
     `).run(assistantId, sessionId, replyText, card ? JSON.stringify(card) : null, modelLabel,
@@ -724,12 +762,13 @@ export async function handleLlamreiPrompt(input: {
     db.exec('RELEASE agent_turn');
   } catch (error) {
     db.exec('ROLLBACK TO agent_turn; RELEASE agent_turn');
+    const saved = completedTurn();
+    if (saved) return saved;
     throw error;
   }
 
-  const message = db.prepare('SELECT * FROM chat_messages WHERE id = ?');
-  const userMessage = message.get(userId) as unknown as ChatMessageRow;
-  const assistantMessage = message.get(assistantId) as unknown as ChatMessageRow;
+  const userMessage = findMessage.get(userId, sessionId) as unknown as ChatMessageRow;
+  const assistantMessage = findMessage.get(assistantId, sessionId) as unknown as ChatMessageRow;
   sseBus.emit('agent:message', assistantMessage);
 
   return { userMessage, assistantMessage, usedGemini, providerUsed, attempts };

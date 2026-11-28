@@ -6,7 +6,7 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [ ] Phase 01 centralized authority, privacy and execution reliability.
 - [ ] Phase 02 design tokens and accessible UI primitives.
 - [x] Phase 03 workspace redesign and local acceptance checks.
-- [ ] Phase 04 Cognitive Core.
+- [x] Phase 04 Cognitive Core and local acceptance checks.
 - [ ] Phases 05–11 per master plan.
 
 ## Phase 00
@@ -82,3 +82,13 @@ The commit titled `feat(agent): stream bounded turns with validated tool sources
 Prompt context uses the recent thread, selected attachment fields and bounded, redacted tool observations. User data remain outside the system instruction. Source labels derive from selected attachments and successful reads, with references stored alongside the final answer. Migration 009 preserved earlier thread rows and its source references survived restart and restoration of a synthetic backup.
 
 Typecheck and 53 server tests passed. The HTTP fixture confirmed deltas arrive before persistence, a cancelled turn leaves the draft uncommitted, invalid calls create no approval, the JSON route still works, and forwarded requests share the existing auth and origin checks. Composio fixtures exercised validation both before proposal and at execution. Browser streaming, retry controls and the latency panel remain in the next batch.
+
+## Phase 04 batch 3 — JARVIS streaming and retry
+
+The commit titled `feat(copilot): show live answers, safe retry, and model latency` displays provisional text, tool activity, final sources, and model selection in the JARVIS drawer. Users can stop a reply and retry with their draft. The server reuses a saved answer when the same request and payload return after a connection loss. A retry with a saved approval does not create another proposal. Task and alarm proposals show a summary and the exact parameters. Settings shows text latency by model and supports refreshing measurements.
+
+The Phase 04 branch started at `develop/llamrei-4` and fast-forwarded locally to the merged Phase 03 tree `a24cc9b`. Node 24.22.3 completed `npm ci`, typecheck, the production build and 54 server tests with zero failures or skips. Production JavaScript measured 136.39 kB gzipped. Both migrations were verified with disposable SQLite backups. A focused test replayed concurrent requests and found one stored reply and one approval.
+
+Chromium served the production build from the actual API with synthetic SQLite data and a synthetic loopback model. It verified visible partial text, source references, keyboard cancellation, HTTP failure with draft retention, retry after a lost completion receipt, and approval and Undo for a local task. Obsidian screenshots at 360, 768 and 1440 px and light mode at 1440 px were inspected with no horizontal overflow or browser errors. Scoped axe checks found zero automated violations in the JARVIS drawer and latency panel. The fixture measured p50 at 173 ms and p95 at 184 ms from four streamed text samples. The delays came from the synthetic model server.
+
+The Phase 04 local acceptance gate passes. Real opt-in provider smoke tests remain open. Cloud inference is limited to verified zero-cost routes, and paid dispatch remains gated. Ollama requires an installed model on a loopback daemon exposing `/api/tags`. Real model latency and audio latency have not been measured.

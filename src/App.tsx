@@ -22,12 +22,11 @@ import { DialogPanel } from './components/ui/DialogPanel';
 import { isActiveAlarm } from './lib/alarm-state';
 import { listTaskStatuses } from './lib/task-status';
 import { apiRequest } from './lib/api-client';
+import { streamAgentReply, type AgentRequest, type AgentRequestControls } from './lib/agent-client';
 import { ThemeProvider } from './theme/ThemeContext';
 import type {
-  AiProviderId,
   AlarmReminderItem,
   BootstrapPayload,
-  ChatMessageItem,
   NavTab,
   PhoneNotificationItem,
   TaskItem,
@@ -254,21 +253,8 @@ function DashboardShell() {
     }
   };
 
-  const sendPromptToLlamrei = async (
-    prompt: string,
-    context?: Record<string, unknown> | null,
-    aiOverride?: { providerOverride?: AiProviderId; modelOverride?: string },
-  ) => {
-    setCopilotOpen(true);
-    const result = await apiRequest<{ userMessage: ChatMessageItem; assistantMessage: ChatMessageItem }>('/api/agent/prompt', {
-      method: 'POST',
-      body: {
-        prompt,
-        contextAttachment: context ?? null,
-        providerOverride: aiOverride?.providerOverride,
-        modelOverride: aiOverride?.modelOverride,
-      },
-    });
+  const sendPromptToLlamrei = async (request: AgentRequest, controls: AgentRequestControls) => {
+    const result = await streamAgentReply(request, controls);
     setData((current) => {
       if (!current) return current;
       const received = [result.userMessage, result.assistantMessage]
@@ -276,6 +262,7 @@ function DashboardShell() {
       return received.length ? { ...current, chatMessages: [...current.chatMessages, ...received] } : current;
     });
     void refreshAfterMutation();
+    return result;
   };
 
   const prepareCopilotDraft = (prompt: string, context?: Record<string, unknown>) => {
@@ -294,7 +281,7 @@ function DashboardShell() {
         draft={copilotDraft}
         onDraftLoaded={clearCopilotDraft}
         pendingContext={pendingContext}
-        onClearContext={() => setPendingContext(null)}
+        onClearContext={(expected) => setPendingContext((current) => expected && current !== expected ? current : null)}
         onSendPrompt={sendPromptToLlamrei}
         onOpenIntegrations={() => {
           setActiveTab('integrations');
