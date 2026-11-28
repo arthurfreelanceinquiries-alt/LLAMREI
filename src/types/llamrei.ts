@@ -1,23 +1,16 @@
+import type { AiProviderId } from '../../shared/ai-protocol';
+export type { AiProviderId } from '../../shared/ai-protocol';
+
 export type ThemeId = 'tactical' | 'hybrid' | 'obsidian' | 'bento' | 'light';
 
 export type NavTab = 'morning' | 'clickup' | 'calendar' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
-
-export type AiProviderId =
-  | 'auto'
-  | 'opencode_zen'
-  | 'opencode_cli'
-  | 'openrouter'
-  | 'groq'
-  | 'ollama'
-  | 'gemini'
-  | 'local';
 
 export interface AiModelOption {
   id: string;
   name: string;
   provider: Exclude<AiProviderId, 'auto' | 'local'>;
   isFree: boolean;
-  supportsTools: boolean;
+  supportsTools?: boolean;
   contextLimit?: number;
   note?: string;
 }
@@ -342,6 +335,7 @@ export interface ChatMessageItem {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   approval_card_json: string | null;
+  source_refs_json?: string | null;
   model_used: string | null;
   created_at: string;
 }

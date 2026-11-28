@@ -6,7 +6,8 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [ ] Phase 01 centralized authority, privacy and execution reliability.
 - [ ] Phase 02 design tokens and accessible UI primitives.
 - [x] Phase 03 workspace redesign and local acceptance checks.
-- [ ] Phases 04–11 per master plan.
+- [x] Phase 04 Cognitive Core and local acceptance checks.
+- [ ] Phases 05–11 per master plan.
 
 ## Phase 00
 
@@ -65,3 +66,29 @@ Chromium with a loopback API and synthetic in-memory SQLite verified task, subta
 Screenshots were captured in Obsidian at 360, 768 and 1440 px and in the light theme at 1440 px. The inspected layouts had no horizontal document overflow or browser errors. Scoped axe checks found zero automated violations in the calendar and command palette. Calendar contrast follow-up remains for nodes axe flagged for manual review. On this cloud host using Vite and synthetic data, cold overview loads took 423–597 ms, opening and filling the palette took 57–70 ms, and calendar navigation took 81–84 ms on desktop and 173–174 ms through the compact drawer. Performance on target hardware remains unverified.
 
 The Phase 03 local acceptance gate passes. Real Android exact alarms, NectarLink delivery, live Notion sync and real cloud account execution remain unverified. Phase 04 covers provider routing, streaming, cost and context validation before live opt-in smoke checks.
+
+## Phase 04 batch 1 — model routing and measurements
+
+The commit titled `feat(ai): route verified models with streaming and latency metrics` separates OpenAI-compatible transport from eligibility, routing and measurement. OpenCode and OpenRouter require a current exact zero-price listing and skip routes reporting a charge. OpenRouter keeps zero routing ceilings. Ollama connects only to loopback and uses the native `/api/tags` list to verify the installed selection and exclude hosted aliases. Known tool and context limits influence fallback. A transient rate limit opens the circuit, two failures within a minute trigger a cooldown, and one probe can attempt recovery. Transport errors use fixed descriptions.
+
+The adapter reads SSE deltas and assembles complete tool arguments. Incomplete responses and invalid argument objects are rejected. Authenticated `GET /api/ai/metrics` groups up to 2,048 local attempt samples over seven days and reports p50 and p95 time to first streamed text by provider and model with sample counts. Cancelled, failed, buffered JSON and tool-only responses do not contribute to text latency percentiles. The metric records provider dispatch to the first non-whitespace text delta. Dispatch samples contain timing and route metadata. Audio measurements belong in Phase 08.
+
+Node 24.22.3 completed a clean lockfile install, typecheck and 49 server tests. Mock coverage includes UTF-8 split frames, fragmented calls, truncation, cancellation, capability fallback, circuit cooldown and reopening, hosted alias denial and zero-cost billing checks. A synthetic Phase 03 backup migrated to 008 once and preserved task rows and a legacy usage entry. Restart and restore retained timing samples and passed SQLite integrity and foreign-key checks. Live model compatibility and priced billing remain open. Streaming through the conversation and browser is tracked in the next batch.
+
+## Phase 04 batch 2 — conversation and tool boundaries
+
+The commit titled `feat(agent): stream bounded turns with validated tool sources` adds authenticated NDJSON at `POST /api/agent/prompt/stream`. The JSON prompt endpoint remains available. A disconnect cancels the upstream response. The user message, final answer, and any pending proposal are saved together after completion. Provider text stays provisional until completion and tool calls must match the per-turn registry and argument schema. External agent tools require cloud consent and recheck their bound account before dispatch. Writes still require approval. Unknown messaging recipients need a registered contact.
+
+Prompt context uses the recent thread, selected attachment fields and bounded, redacted tool observations. User data remain outside the system instruction. Source labels derive from selected attachments and successful reads, with references stored alongside the final answer. Migration 009 preserved earlier thread rows and its source references survived restart and restoration of a synthetic backup.
+
+Typecheck and 53 server tests passed. The HTTP fixture confirmed deltas arrive before persistence, a cancelled turn leaves the draft uncommitted, invalid calls create no approval, the JSON route still works, and forwarded requests share the existing auth and origin checks. Composio fixtures exercised validation both before proposal and at execution. Browser streaming, retry controls and the latency panel remain in the next batch.
+
+## Phase 04 batch 3 — JARVIS streaming and retry
+
+The commit titled `feat(copilot): show live answers, safe retry, and model latency` displays provisional text, tool activity, final sources, and model selection in the JARVIS drawer. Users can stop a reply and retry with their draft. The server reuses a saved answer when the same request and payload return after a connection loss. A retry with a saved approval does not create another proposal. Task and alarm proposals show a summary and the exact parameters. Settings shows text latency by model and supports refreshing measurements.
+
+The Phase 04 branch started at `develop/llamrei-4` and fast-forwarded locally to the merged Phase 03 tree `a24cc9b`. Node 24.22.3 completed `npm ci`, typecheck, the production build and 54 server tests with zero failures or skips. Production JavaScript measured 136.39 kB gzipped. Both migrations were verified with disposable SQLite backups. A focused test replayed concurrent requests and found one stored reply and one approval.
+
+Chromium served the production build from the actual API with synthetic SQLite data and a synthetic loopback model. It verified visible partial text, source references, keyboard cancellation, HTTP failure with draft retention, retry after a lost completion receipt, and approval and Undo for a local task. Obsidian screenshots at 360, 768 and 1440 px and light mode at 1440 px were inspected with no horizontal overflow or browser errors. Scoped axe checks found zero automated violations in the JARVIS drawer and latency panel. The fixture measured p50 at 173 ms and p95 at 184 ms from four streamed text samples. The delays came from the synthetic model server.
+
+The Phase 04 local acceptance gate passes. Real opt-in provider smoke tests remain open. Cloud inference is limited to verified zero-cost routes, and paid dispatch remains gated. Ollama requires an installed model on a loopback daemon exposing `/api/tags`. Real model latency and audio latency have not been measured.

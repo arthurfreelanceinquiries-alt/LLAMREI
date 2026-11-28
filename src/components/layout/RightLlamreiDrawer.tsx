@@ -1,6 +1,8 @@
 import { Bot, History, Mic, Send, Settings2, Square, Volume2, VolumeX, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { MAX_AGENT_PROMPT_CHARS, type AgentProgress, type AgentSource } from '../../../shared/ai-protocol';
 import { aiProviderLabels } from '../../lib/ai-provider-options';
+import type { AgentReply, AgentRequest, AgentRequestControls } from '../../lib/agent-client';
 import { formatWibStamp } from '../../lib/calendar-time';
 import { usePendingAction } from '../../lib/use-pending-action';
 import { isVoiceRecognitionSupported, speakLlamreiReply, startVoiceDictation } from '../../lib/voice';
@@ -20,12 +22,8 @@ interface Props {
   pendingContext: Record<string, unknown> | null;
   draft?: CopilotDraft | null;
   onDraftLoaded: () => void;
-  onClearContext: () => void;
-  onSendPrompt: (
-    prompt: string,
-    context?: Record<string, unknown> | null,
-    aiOverride?: { providerOverride?: AiProviderId; modelOverride?: string },
-  ) => Promise<void>;
+  onClearContext: (expected?: Record<string, unknown>) => void;
+  onSendPrompt: (request: AgentRequest, controls: AgentRequestControls) => Promise<AgentReply>;
   onApproveAudit: (auditId: string) => Promise<void>;
   onUndoAudit: (auditId: string) => Promise<void>;
   onOpenIntegrations: () => void;
@@ -69,6 +67,24 @@ function statusText(card: ApprovalCard): string {
   return actionStatus[card.status] ?? 'Status belum diketahui';
 }
 
+function readSources(raw?: string | null): AgentSource[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is AgentSource =>
+      typeof entry?.id === 'string' && /^S\d+$/.test(entry.id) && typeof entry.label === 'string',
+    ) : [];
+  } catch {
+    return [];
+  }
+}
+
+function stageLabel(stage: Extract<AgentProgress, { type: 'state' }>): string {
+  if (stage.stage === 'tools') return `Membaca ${stage.label}…`;
+  if (stage.stage === 'answering') return `Menyusun balasan · ${aiProviderLabels[stage.provider]}`;
+  return 'Menyiapkan balasan…';
+}
+
 export function RightLlamreiDrawer({
   messages, auditLogs, aiProviders, connectedAppsCount = 0, allowCloudContext,
   pendingContext, draft, onDraftLoaded, onClearContext, onSendPrompt, onApproveAudit, onUndoAudit,
@@ -82,11 +98,15 @@ export function RightLlamreiDrawer({
   const [voiceNote, setVoiceNote] = useState('');
   const [providerOverride, setProviderOverride] = useState<AiProviderId>();
   const [modelOverride, setModelOverride] = useState('');
+  const [pending, setPending] = useState<{ prompt: string; text: string; label: string }>();
+  const [feedback, setFeedback] = useState<{ text: string; error?: boolean }>();
+  const [retryPrompt, setRetryPrompt] = useState<{ prompt: string; requestId: string }>();
   const stopVoice = useRef<(() => void) | null>(null);
+  const activeRequest = useRef<AbortController | null>(null);
   const lastSpoken = useRef<string | null>(messages.at(-1)?.id ?? null);
   const scroller = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const send = usePendingAction();
   const audit = usePendingAction();
   const selectedProvider = providerOverride ?? aiProviders?.activeProvider ?? 'auto';
   const provider = aiProviders?.providers.find((item) => item.id === selectedProvider);
@@ -98,14 +118,15 @@ export function RightLlamreiDrawer({
   useEffect(() => {
     if (!draft) return;
     setInput(draft.prompt);
+    setFeedback(undefined);
     setView('chat');
     composer.current?.focus();
     onDraftLoaded();
   }, [draft, onDraftLoaded]);
 
   useEffect(() => {
-    if (view === 'chat' && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
-  }, [lastMessage?.id, view, send.pending]);
+    if (view === 'chat' && scroller.current && followLatest.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+  }, [lastMessage?.id, view, pending]);
 
   useEffect(() => {
     if (!ttsEnabled || lastMessage?.role !== 'assistant' || lastSpoken.current === lastMessage.id) return;
@@ -114,19 +135,54 @@ export function RightLlamreiDrawer({
   }, [ttsEnabled, lastMessage]);
 
   useEffect(() => () => {
+    activeRequest.current?.abort();
     stopVoice.current?.();
     window.speechSynthesis?.cancel();
   }, []);
 
   async function submitPrompt() {
     const prompt = input.trim();
-    if (!prompt) return;
-    if (await send.run('prompt', () => onSendPrompt(prompt, pendingContext, {
-      providerOverride: selectedProvider,
-      modelOverride: selectedModel || undefined,
-    }), 'Balasan belum diterima. Periksa percakapan sebelum mengirim ulang.')) {
+    if (!prompt || activeRequest.current) return;
+    if (prompt.length > MAX_AGENT_PROMPT_CHARS) {
+      setFeedback({ error: true, text: `Pesan dapat memuat hingga ${MAX_AGENT_PROMPT_CHARS} karakter.` });
+      return;
+    }
+    const request = new AbortController();
+    const requestId = retryPrompt?.prompt === prompt ? retryPrompt.requestId : crypto.randomUUID();
+    activeRequest.current = request;
+    followLatest.current = true;
+    setFeedback(undefined);
+    setPending({ prompt, text: '', label: 'Menyiapkan balasan…' });
+    try {
+      const result = await onSendPrompt({
+        prompt, requestId, contextAttachment: pendingContext, providerOverride: selectedProvider, modelOverride: selectedModel || undefined,
+      }, {
+        signal: request.signal,
+        onProgress(progress) {
+          if (request.signal.aborted) return;
+          setPending((current) => {
+            if (!current) return current;
+            return progress.type === 'delta'
+              ? { ...current, text: current.text + progress.text }
+              : { ...current, text: '', label: stageLabel(progress) };
+          });
+        },
+      });
       setInput((current) => current.trim() === prompt ? '' : current);
-      if (pendingContext) onClearContext();
+      if (pendingContext) onClearContext(pendingContext);
+      setRetryPrompt(undefined);
+      if (result.providerUsed === 'local' && result.attempts.length) {
+        setFeedback({ text: 'Balasan dibuat dalam mode lokal.' });
+      }
+    } catch (error) {
+      setRetryPrompt({ prompt, requestId });
+      setFeedback(request.signal.aborted
+        ? { text: 'Balasan dihentikan. Pesan siap dikirim ulang.' }
+        : { error: true, text: error instanceof Error && !(error instanceof TypeError || error instanceof SyntaxError)
+            ? error.message : 'Balasan terhenti. Periksa koneksi dan coba lagi.' });
+    } finally {
+      activeRequest.current = null;
+      setPending(undefined);
     }
   }
 
@@ -197,7 +253,13 @@ export function RightLlamreiDrawer({
       </header>
 
       {audit.error && <p className="ds-note mx-3 mt-2" role="alert">{audit.error}</p>}
-      <div ref={scroller} role="region" aria-label={view === 'audit' ? 'Riwayat aksi' : 'Pesan percakapan'} tabIndex={0} className="themed-scroll min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 focus-visible:outline-offset-[-2px]">
+      <div ref={scroller} role="region" aria-label={view === 'audit' ? 'Riwayat aksi' : 'Pesan percakapan'} tabIndex={0}
+        className="themed-scroll min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 focus-visible:outline-offset-[-2px]"
+        onScroll={(event) => {
+          const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
+          if (view === 'chat') followLatest.current = scrollHeight - scrollTop - clientHeight < 64;
+        }}
+      >
         {view === 'audit' ? (
           <>
             {!auditLogs.length && <p className="py-4 text-sm text-[var(--text-secondary)]">Belum ada aksi.</p>}
@@ -215,9 +277,10 @@ export function RightLlamreiDrawer({
           </>
         ) : (
           <>
-            {!messages.length && <p className="py-4 text-sm text-[var(--text-secondary)]">Belum ada percakapan.</p>}
+            {!messages.length && !pending && <p className="py-4 text-sm text-[var(--text-secondary)]">Belum ada percakapan.</p>}
             {messages.map((message) => {
               const card = readApproval(message.approval_card_json);
+              const sources = readSources(message.source_refs_json);
               const fromUser = message.role === 'user';
               return (
                 <div key={message.id} className="space-y-2">
@@ -227,6 +290,13 @@ export function RightLlamreiDrawer({
                       {message.model_used && <span>{message.model_used}</span>}
                     </div>
                     <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+                    {!!sources.length && (
+                      <ul aria-label="Sumber balasan" className="flex flex-wrap gap-1 pt-1">
+                        {sources.map(({ id, label }) => (
+                          <li key={id} className="rounded-md bg-[var(--bg-elevated)] px-2 py-1 text-xs text-[var(--text-secondary)]">{id} · {label}</li>
+                        ))}
+                      </ul>
+                    )}
                   </article>
 
                   {card && (
@@ -234,6 +304,12 @@ export function RightLlamreiDrawer({
                       <p className={`text-xs font-semibold ${card.status === 'pending_approval' ? 'text-[var(--warning)]' : 'text-[var(--text-secondary)]'}`}>{statusText(card)}</p>
                       <h3 className="text-sm font-semibold">{card.title}</h3>
                       <p className="whitespace-pre-wrap text-sm text-[var(--text-secondary)]">{card.summary}</p>
+                      {card.status === 'pending_approval' && card.args && (card.toolName === 'create_clickup_task' || card.toolName === 'set_task_alarm_and_calendar') && (
+                        <details>
+                          <summary className="flex min-h-11 cursor-pointer items-center text-xs font-medium text-[var(--text-secondary)]">Parameter aksi</summary>
+                          <pre className="whitespace-pre-wrap rounded bg-[var(--bg-elevated)] p-2 text-xs [overflow-wrap:anywhere]">{JSON.stringify(card.args, null, 2)}</pre>
+                        </details>
+                      )}
                       {card.executionNote && <p className="ds-note">{card.executionNote}</p>}
                       {card.status === 'pending_approval' && (
                         <Control className="ds-control--primary" disabled={!!audit.pending} onClick={() => runAudit(card.auditId, onApproveAudit)}>
@@ -248,7 +324,18 @@ export function RightLlamreiDrawer({
                 </div>
               );
             })}
-            {send.pending && <p role="status" className="text-sm text-[var(--text-secondary)]">Menunggu balasan…</p>}
+            {pending && (
+              <div className="space-y-2 [overflow-wrap:anywhere]">
+                <article className="ml-4 space-y-1 rounded-lg bg-[var(--accent-soft)] px-3 py-2">
+                  <p className="text-xs font-semibold text-[var(--text-secondary)]">Anda</p>
+                  <p className="whitespace-pre-wrap text-sm">{pending.prompt}</p>
+                </article>
+                <article aria-label="Balasan sementara" className="space-y-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2">
+                  <p role="status" className="text-xs font-medium text-[var(--text-secondary)]">{pending.label}</p>
+                  {pending.text && <p className="whitespace-pre-wrap text-sm leading-relaxed">{pending.text}</p>}
+                </article>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -258,23 +345,24 @@ export function RightLlamreiDrawer({
           {pendingContext && (
             <div className="flex items-center justify-between gap-2 rounded-lg bg-[var(--accent-soft)] pl-3 text-xs">
               <span className="min-w-0 truncate">Konteks: {String(pendingContext.title ?? pendingContext.event_name ?? 'Item terpilih')}</span>
-              <Control aria-label="Lepas konteks" onClick={onClearContext}><X aria-hidden="true" /></Control>
+              <Control aria-label="Lepas konteks" onClick={() => onClearContext()}><X aria-hidden="true" /></Control>
             </div>
           )}
-          {!input && !send.pending && (
+          {!input && !pending && (
             <div className="flex flex-wrap gap-1">
               <Control className="ds-control--outline" onClick={() => { setInput('Briefing pagi'); composer.current?.focus(); }}>Briefing pagi</Control>
               <Control className="ds-control--outline" onClick={() => { setInput('Auto schedule hari ini'); composer.current?.focus(); }}>Susun jadwal</Control>
             </div>
           )}
           {voiceNote && <p className="ds-note" role="status">{voiceNote}</p>}
-          {send.error && <p className="ds-note" role="alert">{send.error}</p>}
+          {feedback && <p className="ds-note" role={feedback.error ? 'alert' : 'status'}>{feedback.text}</p>}
           <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void submitPrompt(); }}>
             <textarea
               ref={composer}
               aria-label="Pesan ke asisten"
               className="ds-field min-h-16 resize-y"
               rows={2}
+              maxLength={MAX_AGENT_PROMPT_CHARS}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder={`Tanya ${assistantName}…`}
@@ -283,7 +371,16 @@ export function RightLlamreiDrawer({
               <Control aria-label={listening ? 'Hentikan dikte' : 'Dikte pesan'} aria-pressed={listening} title="Dikte pesan" disabled={!isVoiceRecognitionSupported()} onClick={toggleMic}>
                 {listening ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}
               </Control>
-              <Control type="submit" className="ds-control--primary" disabled={!input.trim() || !!send.pending}><Send aria-hidden="true" /> Kirim</Control>
+              {pending ? (
+                <Control key="stop" className="ds-control--outline" onClick={(event) => {
+                  event.preventDefault();
+                  activeRequest.current?.abort();
+                }}><Square aria-hidden="true" /> Hentikan balasan</Control>
+              ) : (
+                <Control key="send" type="submit" className="ds-control--primary" disabled={!input.trim()}>
+                  <Send aria-hidden="true" /> {input.trim() === retryPrompt?.prompt ? 'Kirim ulang' : 'Kirim'}
+                </Control>
+              )}
             </div>
           </form>
         </div>

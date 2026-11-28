@@ -99,6 +99,7 @@ test('Multi-Provider AI auto-fallback switches from rate-limited OpenCode Zen to
       if (url.includes('opencode.ai')) {
         return new Response('Rate limited', { status: 429 });
       }
+      if (url === 'http://127.0.0.1:11434/api/tags') return Response.json({ models: [{ model: 'qwen2.5:7b' }] });
       if (url.startsWith('http://127.0.0.1:11434/')) {
         return new Response(
           JSON.stringify({
@@ -230,6 +231,10 @@ test('Private prompts, stored history, attachments and tool observations stay lo
     ).run('Sensitive prior note. Email private@example.test');
     let calls = 0;
     const fetchImpl: typeof fetch = async (url, init) => {
+      if (String(url) === 'http://127.0.0.1:11434/api/tags') {
+        assert.equal(init?.body, undefined);
+        return Response.json({ models: [{ model: 'qwen2.5:7b' }] });
+      }
       calls++;
       assert.equal(String(url), 'http://127.0.0.1:11434/v1/chat/completions');
       assert.equal(init?.redirect, 'error');
@@ -471,9 +476,16 @@ test('Composio mock discovery, approval binding, execution outcomes and default-
     assert.equal((await approveAuditAction(expired, undefined, mockFetch))?.status, 'failed');
     assert.equal(executedWriteCount, 2);
 
+    const legacyInvalid = await newApproval();
+    getDb().prepare(`UPDATE agent_audit_logs SET tool_args_json = json_set(tool_args_json, '$.arguments.body', 17) WHERE id = ?`).run(legacyInvalid);
+    assert.equal((await approveAuditAction(legacyInvalid, undefined, mockFetch))?.status, 'failed');
+
     mockArguments = { ...mockArguments, body: 17 };
-    const invalid = await newApproval();
-    assert.equal((await approveAuditAction(invalid, undefined, mockFetch))?.status, 'failed');
+    const invalid = await handleLlamreiPrompt({
+      prompt: 'Siapkan email dengan parameter fixture yang tidak valid',
+      aiOptions: { providerOverride: 'opencode_zen', fetchImpl: mockFetch },
+    });
+    assert.equal(invalid.assistantMessage.approval_card_json, null);
     assert.equal(executedWriteCount, 2);
   } finally {
     cleanup();
