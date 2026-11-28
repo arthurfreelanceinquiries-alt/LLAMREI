@@ -4,6 +4,17 @@ export function notifyApiSessionRequired(url: string, status: number): void {
   if (status === 401 && url.startsWith('/api/')) window.dispatchEvent(new Event(API_SESSION_REQUIRED));
 }
 
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  try {
+    const data: unknown = JSON.parse(error.message);
+    return data && typeof data === 'object' && 'error' in data && typeof data.error === 'string' && data.error.length < 240
+      ? data.error : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export async function apiRequest<T = unknown>(
   url: string,
   options?: { method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: unknown; signal?: AbortSignal },

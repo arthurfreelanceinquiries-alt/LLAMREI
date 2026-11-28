@@ -8,7 +8,7 @@ Baseline source: `7797785`. Work starts from `develop/llamrei-4` at `01c1263` on
 - [x] Phase 03 workspace redesign and local acceptance checks.
 - [x] Phase 04 Cognitive Core and local acceptance checks.
 - [x] Phase 05 Knowledge Vault and personal memory local acceptance.
-- [ ] Phase 06 Unified Inbox and Composio.
+- [x] Phase 06 Unified Inbox and Composio local acceptance.
 - [ ] Phases 07–11 per master plan.
 
 ## Phase 00
@@ -114,3 +114,11 @@ The commit titled `feat(inbox): unify persisted conversations and bound mail syn
 Follow-up records link existing contacts, use revision checks, and bind a local read marker to the message the owner actually saw. Drafts reuse the pending approval queue. Retried drafts resolve to the same record and receipt labels distinguish a provider confirmation, owner confirmation, handoff and unknown outcome.
 
 Typecheck and 65 server tests passed, including synthetic Gmail and Composio coverage for account isolation, deduplication and revocation. A disposable Phase 05 backup migrated through 011 and passed restart, integrity, foreign-key and recovery checks. WhatsApp and Telegram notifications and Gmail provider shape remain untested with real accounts.
+
+## Phase 06 batch 2 — inbox workspace and approval handoff
+
+The commit titled `feat(inbox): surface conversations and approval drafts` adds the responsive Inbox workspace, local search and source, unread and follow-up filters. It previews conversation history, tracks follow-ups in WIB, and shows the saved recipient, channel and time when composing a draft. Review opens the existing scheduled messages queue. Integration health timestamps show the most recent recorded update.
+
+Typecheck, the production build and 65 server tests passed. The lazy Inbox chunk measured 4.31 kB gzipped. Chromium exercised synthetic Gmail sync twice, account-scoped deduplication, source filters, local read state, contact linkage, follow-up scheduling and draft save retry after a fixture HTTP 503. The draft remained pending approval and appeared in the scheduled queue. No messages were sent. Inspected Inbox screenshots at 360, 768 and 1440 px in Obsidian and at 1440 px in light mode had no horizontal overflow. Scoped axe checks reported zero automated violations and marked the draft dialog's contrast for manual review.
+
+The source gallery and Gmail endpoint were tested with fixture archives and synthetic Composio responses. The configured Telegram source is the recorded phone notification archive. Gmail provider compatibility and live connector delivery confirmation still need real-account testing. Phase 07 begins with durable local events and mission checkpoints.

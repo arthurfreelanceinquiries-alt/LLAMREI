@@ -34,6 +34,7 @@ import type {
 } from './types/llamrei';
 
 const MemoryVault = lazy(() => import('./components/memory/MemoryVault').then(({ MemoryVault }) => ({ default: MemoryVault })));
+const InboxView = lazy(() => import('./components/inbox/InboxView').then(({ InboxView }) => ({ default: InboxView })));
 
 function DashboardShell() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
@@ -58,6 +59,7 @@ function DashboardShell() {
   const [isCompact, setIsCompact] = useState(() => !window.matchMedia('(min-width: 1024px)').matches);
   const [bootstrapError, setBootstrapError] = useState(false);
   const [liveUpdates, setLiveUpdates] = useState(true);
+  const [inboxVersion, setInboxVersion] = useState(0);
 
   useEffect(() => {
     const query = window.matchMedia('(min-width: 1024px)');
@@ -114,6 +116,7 @@ function DashboardShell() {
   useEffect(() => {
     const es = new EventSource('/api/events');
     const refresh = () => void loadBootstrap().catch(() => undefined);
+    const refreshInbox = () => setInboxVersion((current) => current + 1);
     let disconnected = false;
     es.addEventListener('error', () => {
       disconnected = true;
@@ -121,9 +124,12 @@ function DashboardShell() {
     });
     es.addEventListener('open', () => {
       setLiveUpdates(true);
-      if (disconnected) refresh();
+      if (disconnected) { refresh(); refreshInbox(); }
       disconnected = false;
     });
+    for (const event of ['wa:message', 'wa:imported', 'wa:status', 'wa:tag_mention', 'phone:notification', 'phone:notification_updated', 'phone:notification_dismissed', 'chat:update', 'chat:dispatched', 'composio:update']) {
+      es.addEventListener(event, refreshInbox);
+    }
 
     es.addEventListener('alarm:ring', (ev) => {
       const alarm = JSON.parse((ev as MessageEvent).data) as AlarmReminderItem;
@@ -674,6 +680,15 @@ function DashboardShell() {
                 await loadBootstrap();
               }}
             />
+          )}
+
+          {activeTab === 'inbox' && (
+            <WorkspaceSection>
+              <InboxView contacts={data.contacts} version={inboxVersion} onOpenIntegrations={() => navigateTab('integrations')} onOpenScheduled={() => {
+                navigateTab('scheduler');
+                void loadBootstrap().catch(() => undefined);
+              }} />
+            </WorkspaceSection>
           )}
 
           {activeTab === 'watags' && (
