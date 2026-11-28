@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiRequest } from '../../lib/api-client';
+import { formatWibStamp } from '../../lib/calendar-time';
 import type { ComposioState, ComposioToolItem, ComposioToolkitItem } from '../../types/llamrei';
 
 interface Props {
@@ -51,7 +52,7 @@ export function IntegrationsHubView({ composio, onRefreshBootstrap, onOpenSettin
           setLiveRemote(res.liveRemote);
         }
       } catch {
-        if (active) setToolkits(composio.curatedToolkits);
+        if (active) { setToolkits(composio.curatedToolkits); setLiveRemote(false); }
       }
     };
     void load();
@@ -250,6 +251,7 @@ export function IntegrationsHubView({ composio, onRefreshBootstrap, onOpenSettin
                       {conn.status.toUpperCase()}
                     </span>
                   </div>
+                  {conn.updated_at && <p className="text-[11px] text-[var(--text-secondary)]">Status tersimpan {formatWibStamp(conn.updated_at)}</p>}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   {conn.status === 'pending' && conn.redirect_url && (

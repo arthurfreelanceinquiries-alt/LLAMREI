@@ -25,7 +25,7 @@ import {
 } from './alarm-calendar.service.ts';
 import {
   executeApprovedComposioTool,
-  executeAgentComposioRead,
+  executeBoundComposioRead,
   getActiveComposioToolsForAgent,
   type ComposioTarget,
 } from './composio.service.ts';
@@ -625,7 +625,7 @@ export async function handleLlamreiPrompt(input: {
 
   const recalled = useMemory ? await retrieveAssistantMemory(input.prompt, { signal, fetchImpl: input.aiOptions?.fetchImpl }) : [];
   const externalTools = route !== 'local' && mayUseCloud()
-    ? await getActiveComposioToolsForAgent(input.aiOptions?.fetchImpl, signal)
+    ? await getActiveComposioToolsForAgent(input.aiOptions?.fetchImpl, signal, input.prompt)
     : [];
   signal.throwIfAborted();
   const registry = getAgentToolRegistry(mayUseCloud() ? externalTools : []);
@@ -725,7 +725,7 @@ export async function handleLlamreiPrompt(input: {
 
       input.onProgress?.({ type: 'state', stage: 'tools', label: tool.label });
       const result = tool.target
-        ? await executeAgentComposioRead(tool.name, call.args, tool.target, mayUseCloud, signal, input.aiOptions?.fetchImpl)
+        ? await executeBoundComposioRead(tool.name, call.args, tool.target, mayUseCloud, signal, input.aiOptions?.fetchImpl)
         : { ok: true, data: executeLocalRead(tool.name, call.args), summary: 'Read complete' };
       signal.throwIfAborted();
       const source = result.ok ? addSource(tool.name, tool.label) : null;

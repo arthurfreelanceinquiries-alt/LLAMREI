@@ -5,6 +5,7 @@ import {
   ClipboardList,
   Clock3,
   Folder,
+  Inbox,
   Layers3,
   LayoutDashboard,
   List,
@@ -127,6 +128,7 @@ export function LeftClickUpSidebar({
     {
       title: 'Komunikasi',
       items: [
+        { id: 'inbox', icon: Inbox, label: 'Inbox' },
         { id: 'watags', icon: MessageSquare, label: 'Pusat WhatsApp', count: unrepliedWaTagCount, countLabel: 'pesan belum dibalas' },
         { id: 'scheduler', icon: Send, label: 'Pesan Terjadwal', count: pendingChatCount, countLabel: 'pesan menunggu persetujuan' },
       ],

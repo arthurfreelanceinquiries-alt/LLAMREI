@@ -3,7 +3,7 @@ export type { AiProviderId } from '../../shared/ai-protocol';
 
 export type ThemeId = 'tactical' | 'hybrid' | 'obsidian' | 'bento' | 'light';
 
-export type NavTab = 'morning' | 'clickup' | 'calendar' | 'knowledge' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
+export type NavTab = 'morning' | 'clickup' | 'calendar' | 'knowledge' | 'inbox' | 'phonehub' | 'scheduler' | 'watags' | 'journal' | 'goals' | 'integrations';
 
 export interface AiModelOption {
   id: string;
@@ -185,6 +185,7 @@ export interface ContactItem {
   name: string;
   aliases_json: string;
   phone_e164: string;
+  telegram_chat_id?: string | null;
   timezone: string;
   active_hours_note: string | null;
   preferred_channel: 'wa_gateway' | 'nectarlink_bridge' | 'wa_me_manual' | 'telegram' | 'email';

@@ -269,6 +269,7 @@ export async function syncComposioConnections(
   try {
     const res = await fetchImpl(`${COMPOSIO_API_V3}/connected_accounts?user_ids=${encodeURIComponent(userId)}`, {
       headers: getComposioHeaders(apiKey),
+      redirect: 'error',
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {
@@ -281,7 +282,24 @@ export async function syncComposioConnections(
         toolkit?: { slug?: string; name?: string };
         auth_config?: { id?: string };
       }>;
+      next_cursor?: string | null;
+      nextCursor?: string | null;
     };
+    if (!Array.isArray(json?.items) || json.next_cursor || json.nextCursor) {
+      return { ok: false, syncedCount: 0, connections: listComposioConnections(), note: 'Daftar akun Composio belum lengkap.' };
+    }
+
+    const accounts = new Map<string, Map<string, NonNullable<typeof json.items>[number]>>();
+    for (const account of json.items) {
+      const slug = typeof account?.toolkit?.slug === 'string' ? account.toolkit.slug.toLowerCase() : '';
+      if (!/^[a-z0-9_-]{1,64}$/.test(slug) || typeof account.id !== 'string' || !account.id || typeof account.status !== 'string') {
+        return { ok: false, syncedCount: 0, connections: listComposioConnections(), note: 'Format akun Composio tidak valid.' };
+      }
+      const byAccount = accounts.get(slug) ?? new Map();
+      if (byAccount.has(account.id)) return { ok: false, syncedCount: 0, connections: listComposioConnections(), note: 'Daftar akun Composio tidak konsisten.' };
+      byAccount.set(account.id, account);
+      accounts.set(slug, byAccount);
+    }
 
     const db = getDb();
     const upsert = db.prepare(
@@ -295,39 +313,37 @@ export async function syncComposioConnections(
          updated_at = datetime('now')`,
     );
 
-    let syncedCount = 0;
-    for (const acc of json.items ?? []) {
-      const slug = acc.toolkit?.slug?.toLowerCase();
-      if (!slug || !acc.id) continue;
-      const rawStatus = (acc.status ?? '').toUpperCase();
-      const mappedStatus: ComposioConnectionRow['status'] =
-        rawStatus === 'ACTIVE'
-          ? 'active'
-          : rawStatus === 'EXPIRED'
-            ? 'expired'
-            : rawStatus === 'FAILED'
-              ? 'failed'
-              : 'pending';
-      upsert.run(
-        `comp_${slug}`,
-        slug,
-        acc.toolkit?.name || slug,
-        acc.auth_config?.id ?? null,
-        acc.id,
-        mappedStatus,
-      );
-      syncedCount++;
+    db.exec('SAVEPOINT composio_sync');
+    try {
+      for (const [slug, byAccount] of accounts) {
+        const candidates = [...byAccount.values()];
+        const active = candidates.filter((account) => account.status?.toUpperCase() === 'ACTIVE');
+        const account = active[0] ?? candidates[0];
+        const status = account.status?.toLowerCase();
+        const mappedStatus = active.length > 1 ? 'failed'
+          : status === 'active' || status === 'expired' || status === 'failed' || status === 'disconnected' ? status : 'pending';
+        upsert.run(`comp_${slug}`, slug, typeof account.toolkit?.name === 'string' ? account.toolkit.name.slice(0, 160) : slug,
+          typeof account.auth_config?.id === 'string' ? account.auth_config.id : null,
+          active.length > 1 ? null : account.id ?? null, mappedStatus);
+      }
+      const disconnect = db.prepare("UPDATE composio_connections SET status = 'disconnected', updated_at = datetime('now') WHERE toolkit_slug = ? AND status = 'active'");
+      for (const { toolkit_slug } of listComposioConnections()) if (!accounts.has(toolkit_slug)) disconnect.run(toolkit_slug);
+      db.exec('RELEASE composio_sync');
+    } catch (error) {
+      db.exec('ROLLBACK TO composio_sync; RELEASE composio_sync');
+      throw error;
     }
 
+    const syncedCount = accounts.size;
     const updated = listComposioConnections();
     sseBus.emit('composio:update', { syncedCount });
     return { ok: true, syncedCount, connections: updated, note: `${syncedCount} koneksi aplikasi disinkronkan dari Composio` };
-  } catch (err) {
+  } catch {
     return {
       ok: false,
       syncedCount: 0,
       connections: listComposioConnections(),
-      note: err instanceof Error ? err.message : 'Gagal sinkronisasi Composio',
+      note: 'Gagal sinkronisasi Composio',
     };
   }
 }
@@ -557,28 +573,39 @@ function activeTargets(): ComposioTarget[] {
   );
 }
 
+export function getActiveComposioTarget(toolkitSlug: string): ComposioTarget | null {
+  if (!getSecret('COMPOSIO_API_KEY')) return null;
+  return activeTargets().find((target) => target.toolkitSlug === toolkitSlug) ?? null;
+}
+
 export type AgentComposioTool = UnifiedToolDef & { target: ComposioTarget; readOnly: boolean };
 
 export async function getActiveComposioToolsForAgent(
   fetchImpl: typeof fetch = globalThis.fetch,
   signal?: AbortSignal,
+  query = '',
 ): Promise<AgentComposioTool[]> {
   if (!getSecret('COMPOSIO_API_KEY')) return [];
-  const tools: AgentComposioTool[] = [];
-  for (const target of activeTargets().slice(0, 4)) {
-    const definitions = await listToolkitTools(target.toolkitSlug, 6, fetchImpl, signal);
-    for (const tool of definitions) {
-      if (tool.inputParameters.type !== 'object' || !tool.slug.startsWith(`${target.toolkitSlug.toUpperCase()}_`)) continue;
-      tools.push({
+  const words = new Set(query.toLowerCase().match(/[a-z0-9]{3,48}/g) ?? []);
+  const aliases: Record<string, string[]> = { gmail: ['email', 'mail', 'surel'], googlecalendar: ['agenda', 'kalender', 'calendar'], googledrive: ['drive'], github: ['issue', 'issues', 'penerapan', 'pull'] };
+  const toolkitScore = (slug: string) => words.has(slug) ? 2 : aliases[slug]?.some((word) => words.has(word)) ? 1 : 0;
+  const shortlisted = activeTargets().sort((a, b) => toolkitScore(b.toolkitSlug) - toolkitScore(a.toolkitSlug)).slice(0, 6);
+  const lists = await Promise.all(shortlisted.map(async (target) => {
+    const definitions = await listToolkitTools(target.toolkitSlug, 30, fetchImpl, signal);
+    return definitions.flatMap((tool) => {
+      if (tool.inputParameters?.type !== 'object' || !tool.slug.startsWith(`${target.toolkitSlug.toUpperCase()}_`)) return [];
+      const titleWords = `${tool.slug} ${tool.name}`.toLowerCase().match(/[a-z0-9]{3,48}/g) ?? [];
+      const score = toolkitScore(target.toolkitSlug) * 5 + [...new Set(titleWords)].filter((word) => words.has(word)).length;
+      return [{ score, tool: {
         name: `composio__${tool.slug}`,
         description: `[${target.toolkitSlug.toUpperCase()}${tool.readOnly ? ' · READ' : ' · APPROVAL'}] ${tool.description}`,
         parameters: tool.inputParameters,
         target,
         readOnly: tool.readOnly,
-      });
-    }
-  }
-  return tools.slice(0, 24);
+      } }];
+    });
+  }));
+  return lists.flat().sort((a, b) => b.score - a.score).slice(0, 16).map(({ tool }) => tool);
 }
 
 type ComposioResult = {
@@ -676,7 +703,7 @@ export function executeComposioTool(
   return executeAuthorizedTool(toolSlug, args, fetchImpl);
 }
 
-export function executeAgentComposioRead(
+export function executeBoundComposioRead(
   toolName: string,
   args: unknown,
   target: ComposioTarget,
