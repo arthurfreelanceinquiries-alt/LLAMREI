@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { respondToAgentPrompt } from './ai/agent-http.ts';
 import { getModelLatency } from './ai/provider-metrics.ts';
 import { getDb, initDatabase } from './db/connection.ts';
 import { createBrowserSessions } from './lib/browser-session.ts';
@@ -24,12 +25,11 @@ import {
 import {
   approveAuditAction,
   getAiBudgetSummary,
-  handleLlamreiPrompt,
   listAuditLogs,
   listChatMessages,
   undoAuditAction,
 } from './services/llamrei-agent.service.ts';
-import { getAiProvidersCatalog, type AiProviderId } from './services/ai-provider.service.ts';
+import { getAiProvidersCatalog } from './services/ai-provider.service.ts';
 import {
   disconnectComposioAccount,
   executeComposioTool,
@@ -654,24 +654,8 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, pathname: str
     });
     return true;
   }
-  if (method === 'POST' && pathname === '/api/agent/prompt') {
-    const body = await readJsonBody<{
-      prompt: string;
-      sessionId?: string;
-      contextAttachment?: Record<string, unknown> | null;
-      providerOverride?: AiProviderId;
-      modelOverride?: string;
-    }>(req);
-    const out = await handleLlamreiPrompt({
-      prompt: body.prompt,
-      sessionId: body.sessionId,
-      contextAttachment: body.contextAttachment,
-      aiOptions: {
-        providerOverride: body.providerOverride,
-        modelOverride: body.modelOverride,
-      },
-    });
-    sendJson(res, 200, { ...out, aiBudget: getAiBudgetSummary(), auditLogs: listAuditLogs() });
+  if (method === 'POST' && (pathname === '/api/agent/prompt' || pathname === '/api/agent/prompt/stream')) {
+    await respondToAgentPrompt(req, res, pathname.endsWith('/stream'));
     return true;
   }
   if (method === 'POST' && /^\/api\/agent\/audit\/[^/]+\/approve$/.test(pathname)) {
@@ -1053,7 +1037,10 @@ export function createLlamreiServer(): http.Server {
             sendError(res, 403, 'Browser session writes require the configured origin');
             return;
           }
-          if (pathname === '/api/events' && req.method === 'GET') browserSessions.trackStream(session, res);
+          if ((pathname === '/api/events' && req.method === 'GET') ||
+              ((pathname === '/api/agent/prompt' || pathname === '/api/agent/prompt/stream') && req.method === 'POST')) {
+            browserSessions.trackStream(session, res);
+          }
         }
 
         const handled = await routeApi(req, res, pathname);

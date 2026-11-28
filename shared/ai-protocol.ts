@@ -28,3 +28,18 @@ export interface ModelLatency {
   firstTokenP50Ms: number | null;
   firstTokenP95Ms: number | null;
 }
+
+export const MAX_AGENT_PROMPT_CHARS = 8_000;
+
+export interface AgentSource {
+  id: string;
+  label: string;
+}
+
+export type AgentProgress =
+  | { type: 'state'; stage: 'routing' }
+  | { type: 'state'; stage: 'answering'; provider: ModelProvider; model: string }
+  | { type: 'state'; stage: 'tools'; label: string }
+  | { type: 'delta'; text: string };
+
+export type AgentFrame<T> = AgentProgress | { type: 'complete'; result: T } | { type: 'error'; message: string };

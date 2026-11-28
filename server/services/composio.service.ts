@@ -1,6 +1,4 @@
-import { createRequire } from 'node:module';
-import { Ajv, type ValidateFunction } from 'ajv';
-import type { FormatsPlugin } from 'ajv-formats';
+import { validateToolInput } from '../ai/tool-input.ts';
 import { getDb } from '../db/connection.ts';
 import { sseBus } from '../lib/sse.ts';
 import { getSecret } from './secret.service.ts';
@@ -8,8 +6,6 @@ import type { UnifiedToolDef } from './ai-provider.service.ts';
 
 const COMPOSIO_API_V3 = 'https://backend.composio.dev/api/v3';
 const COMPOSIO_API_V3_1 = 'https://backend.composio.dev/api/v3.1';
-const addFormats = createRequire(import.meta.url)('ajv-formats') as FormatsPlugin;
-const validators = new WeakMap<Record<string, unknown>, ValidateFunction>();
 const APPROVAL_WINDOW_MINUTES = 15;
 
 export interface ComposioToolkitItem {
@@ -490,7 +486,9 @@ export async function listToolkitTools(
   toolkitSlug: string,
   limit = 15,
   fetchImpl: typeof fetch = globalThis.fetch,
+  signal?: AbortSignal,
 ): Promise<ComposioToolItem[]> {
+  signal?.throwIfAborted();
   const slug = toolkitSlug.trim().toLowerCase();
   const cached = cachedToolkitTools.get(slug);
   if (cached && Date.now() - cached.fetchedAt < 10 * 60_000) {
@@ -501,11 +499,13 @@ export async function listToolkitTools(
   if (!apiKey) return [];
 
   try {
+    const timeout = AbortSignal.timeout(8000);
     const res = await fetchImpl(
       `${COMPOSIO_API_V3_1}/tools?toolkit_slug=${encodeURIComponent(slug)}&toolkit_versions=latest&limit=${30}`,
       {
         headers: getComposioHeaders(apiKey),
-        signal: AbortSignal.timeout(8000),
+        redirect: 'error',
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       },
     );
     if (!res.ok) return [];
@@ -532,6 +532,7 @@ export async function listToolkitTools(
     cachedToolkitTools.set(slug, { fetchedAt: Date.now(), tools });
     return tools.slice(0, limit);
   } catch {
+    signal?.throwIfAborted();
     return [];
   }
 }
@@ -556,32 +557,28 @@ function activeTargets(): ComposioTarget[] {
   );
 }
 
-export type AgentComposioTool = UnifiedToolDef & { target: ComposioTarget };
+export type AgentComposioTool = UnifiedToolDef & { target: ComposioTarget; readOnly: boolean };
 
 export async function getActiveComposioToolsForAgent(
   fetchImpl: typeof fetch = globalThis.fetch,
+  signal?: AbortSignal,
 ): Promise<AgentComposioTool[]> {
   if (!getSecret('COMPOSIO_API_KEY')) return [];
   const tools: AgentComposioTool[] = [];
   for (const target of activeTargets().slice(0, 4)) {
-    const definitions = await listToolkitTools(target.toolkitSlug, 6, fetchImpl);
+    const definitions = await listToolkitTools(target.toolkitSlug, 6, fetchImpl, signal);
     for (const tool of definitions) {
-      if (tool.inputParameters.type !== 'object') continue;
+      if (tool.inputParameters.type !== 'object' || !tool.slug.startsWith(`${target.toolkitSlug.toUpperCase()}_`)) continue;
       tools.push({
         name: `composio__${tool.slug}`,
         description: `[${target.toolkitSlug.toUpperCase()}${tool.readOnly ? ' · READ' : ' · APPROVAL'}] ${tool.description}`,
         parameters: tool.inputParameters,
         target,
+        readOnly: tool.readOnly,
       });
     }
   }
   return tools.slice(0, 24);
-}
-
-export function summarizeToolResult(raw: unknown): string {
-  const str = typeof raw === 'string' ? raw : JSON.stringify(raw);
-  if (str.length <= 2200) return str;
-  return `${str.slice(0, 2200)}... [truncated ${str.length - 2200} chars]`;
 }
 
 type ComposioResult = {
@@ -596,56 +593,48 @@ function deny(summary: string): ComposioResult {
   return { ok: false, outcome: 'denied', summary, error: summary };
 }
 
-function validArguments(schema: Record<string, unknown>, args: unknown): boolean {
-  if (schema.type !== 'object' || schema.$async === true || !args || typeof args !== 'object' || Array.isArray(args)) return false;
-  try {
-    // Tool inputs must use declared fields. Composio schemas often omit additionalProperties.
-    let validate = validators.get(schema);
-    if (!validate) {
-      validate = addFormats(new Ajv()).compile({ ...schema, additionalProperties: false });
-      validators.set(schema, validate);
-    }
-    return validate(args) === true;
-  } catch {
-    return false;
-  }
-}
-
 async function executeAuthorizedTool(
   toolSlug: string,
   args: unknown,
   fetchImpl: typeof fetch,
-  approvedTarget?: ComposioTarget,
+  policy: { target?: ComposioTarget; approved?: boolean; signal?: AbortSignal; mayDispatch?: () => boolean } = {},
 ): Promise<ComposioResult> {
+  const { target: expectedTarget, signal, mayDispatch } = policy;
+  signal?.throwIfAborted();
+  if (mayDispatch && !mayDispatch()) return deny('Cloud context consent is required for the agent');
   if (typeof toolSlug !== 'string') return deny('Invalid Composio tool slug');
   const cleanSlug = toolSlug.replace(/^composio__/, '').trim().toUpperCase();
   if (!/^[A-Z0-9_]+$/.test(cleanSlug)) return deny('Invalid Composio tool slug');
-  if (!approvedTarget && !isReadOnlyComposioTool(cleanSlug)) return deny('Composio tool requires approval');
+  if (!policy.approved && !isReadOnlyComposioTool(cleanSlug)) return deny('Composio tool requires approval');
 
   const apiKey = getSecret('COMPOSIO_API_KEY');
   if (!apiKey) return deny('COMPOSIO_API_KEY missing');
 
   const targets = activeTargets().filter(({ toolkitSlug, accountId }) =>
     cleanSlug.startsWith(`${toolkitSlug.toUpperCase()}_`) &&
-    (!approvedTarget || (toolkitSlug === approvedTarget.toolkitSlug && accountId === approvedTarget.accountId)),
+    (!expectedTarget || (toolkitSlug === expectedTarget.toolkitSlug && accountId === expectedTarget.accountId)),
   );
   if (targets.length !== 1) return deny('Composio requires one active account on an enabled toolkit');
   const { toolkitSlug, accountId } = targets[0];
-  const tools = await listToolkitTools(toolkitSlug, 30, fetchImpl);
+  const tools = await listToolkitTools(toolkitSlug, 30, fetchImpl, signal);
   const definition = tools.find((tool) => tool.slug === cleanSlug);
   if (!definition) return deny('Composio tool was not discovered');
-  if (!validArguments(definition.inputParameters, args)) return deny('Invalid Composio tool arguments');
+  if (!validateToolInput(definition.inputParameters, args)) return deny('Invalid Composio tool arguments');
   if (!activeTargets().some((target) => target.toolkitSlug === toolkitSlug && target.accountId === accountId)) {
     return deny('Composio account changed before execution');
   }
+  signal?.throwIfAborted();
+  if (mayDispatch && !mayDispatch()) return deny('Cloud context consent was revoked');
 
   let outcome: ComposioResult['outcome'] = 'unknown';
   let summary = 'Composio execution outcome is unknown';
   let data: unknown;
   let ok = false;
   try {
+    const timeout = AbortSignal.timeout(15000);
     const res = await fetchImpl(`${COMPOSIO_API_V3}/tools/execute/${encodeURIComponent(cleanSlug)}`, {
       method: 'POST',
+      redirect: 'error',
       headers: getComposioHeaders(apiKey),
       body: JSON.stringify({
         user_id: getComposioUserId(),
@@ -653,7 +642,7 @@ async function executeAuthorizedTool(
         arguments: args,
         version: 'latest',
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     const result: unknown = await res.json().catch(() => null);
     const successful = result && typeof result === 'object' && 'successful' in result ? result.successful : undefined;
@@ -687,6 +676,17 @@ export function executeComposioTool(
   return executeAuthorizedTool(toolSlug, args, fetchImpl);
 }
 
+export function executeAgentComposioRead(
+  toolName: string,
+  args: unknown,
+  target: ComposioTarget,
+  mayDispatch: () => boolean,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<ComposioResult> {
+  return executeAuthorizedTool(toolName, args, fetchImpl, { target, mayDispatch, signal });
+}
+
 export async function executeApprovedComposioTool(
   auditId: string,
   fetchImpl: typeof fetch = globalThis.fetch,
@@ -711,5 +711,5 @@ export async function executeApprovedComposioTool(
   if (!request.target?.toolkitSlug || !request.target.accountId) {
     return deny('Composio approval requires a bound account. Create a new approval.');
   }
-  return executeAuthorizedTool(request.toolSlug, request.arguments, fetchImpl, request.target);
+  return executeAuthorizedTool(request.toolSlug, request.arguments, fetchImpl, { target: request.target, approved: true });
 }
